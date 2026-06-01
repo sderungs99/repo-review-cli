@@ -59,7 +59,7 @@ Defaults: `--manifest ./manifest.json`, `--out ./reports/`. Writes:
 
 A JSON object with a `repos` array; each entry is a Subject Repo pinned to a SHA.
 `source` may be any git URL or a local path. See
-[`examples/manifest.example.json`](examples/manifest.example.json):
+[`manifest.example.json`](manifest.example.json):
 
 ```json
 {
