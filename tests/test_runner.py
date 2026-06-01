@@ -33,3 +33,19 @@ def test_two_runs_over_the_same_manifest_are_byte_identical(make_git_repo, write
     second = to_json(run_review(manifest, tmp_path / "work2"))
 
     assert first == second
+
+
+def test_runs_todo_marker_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    path, sha = make_git_repo(
+        "payments-service",
+        SUBSTANTIAL,
+        extra_files={"Service.java": "class Service {\n    // TODO: handle retries\n}\n"},
+    )
+    manifest = write_manifest([("payments-service", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # README is substantial, so the only finding is the TODO marker.
+    assert len(findings) == 1
+    assert findings[0].check_id == "todo-markers"
+    assert findings[0].category == "code-hygiene"
