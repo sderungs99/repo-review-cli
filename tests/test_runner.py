@@ -6,10 +6,14 @@ SUBSTANTIAL = (
     "flow, with retry and idempotency guarantees documented in detail here.\n"
 )
 
+# A minimal test-tree signal, so the tests-present check stays silent and these
+# tests stay focused on the single check each is exercising.
+HAS_TESTS = {"App.test.js": "it('renders', () => {});\n"}
+
 
 def test_runs_readme_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
-    good, good_sha = make_git_repo("payments-service", SUBSTANTIAL)
-    bare, bare_sha = make_git_repo("auth-service", None)
+    good, good_sha = make_git_repo("payments-service", SUBSTANTIAL, extra_files=HAS_TESTS)
+    bare, bare_sha = make_git_repo("auth-service", None, extra_files=HAS_TESTS)
     manifest = write_manifest(
         [("payments-service", good, good_sha), ("auth-service", bare, bare_sha)]
     )
@@ -39,7 +43,7 @@ def test_runs_todo_marker_check_across_every_subject_repo(make_git_repo, write_m
     path, sha = make_git_repo(
         "payments-service",
         SUBSTANTIAL,
-        extra_files={"Service.java": "class Service {\n    // TODO: handle retries\n}\n"},
+        extra_files={"Service.java": "class Service {\n    // TODO: handle retries\n}\n", **HAS_TESTS},
     )
     manifest = write_manifest([("payments-service", path, sha)])
 
@@ -54,7 +58,7 @@ def test_runs_todo_marker_check_across_every_subject_repo(make_git_repo, write_m
 def test_runs_large_file_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
     huge = "\n".join("x" for _ in range(1001)) + "\n"
     path, sha = make_git_repo(
-        "payments-service", SUBSTANTIAL, extra_files={"Big.java": huge}
+        "payments-service", SUBSTANTIAL, extra_files={"Big.java": huge, **HAS_TESTS}
     )
     manifest = write_manifest([("payments-service", path, sha)])
 
@@ -64,3 +68,19 @@ def test_runs_large_file_check_across_every_subject_repo(make_git_repo, write_ma
     assert len(findings) == 1
     assert findings[0].check_id == "large-file"
     assert findings[0].location == "Big.java"
+
+
+def test_runs_tests_present_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    # Substantial README, no source markers, but no test tree either.
+    path, sha = make_git_repo(
+        "payments-service",
+        SUBSTANTIAL,
+        extra_files={"Service.java": "class Service {}\n"},
+    )
+    manifest = write_manifest([("payments-service", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "tests-present"
+    assert findings[0].category == "testing"

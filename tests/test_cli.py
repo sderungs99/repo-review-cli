@@ -11,8 +11,11 @@ SUBSTANTIAL = (
 def test_single_command_writes_findings_file_and_both_reports(
     make_git_repo, write_manifest, tmp_path
 ):
-    good, good_sha = make_git_repo("payments-service", SUBSTANTIAL)
-    bare, bare_sha = make_git_repo("auth-service", None)
+    # Both repos carry a test tree so the tests-present check stays silent,
+    # keeping this test focused on the README-driven documentation finding.
+    has_tests = {"App.test.js": "it('renders', () => {});\n"}
+    good, good_sha = make_git_repo("payments-service", SUBSTANTIAL, extra_files=has_tests)
+    bare, bare_sha = make_git_repo("auth-service", None, extra_files=has_tests)
     manifest = write_manifest(
         [("payments-service", good, good_sha), ("auth-service", bare, bare_sha)]
     )
