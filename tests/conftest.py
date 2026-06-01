@@ -15,7 +15,7 @@ def make_git_repo(tmp_path):
     """Factory: create a local git repo with one commit; return (path, sha)."""
     counter = {"n": 0}
 
-    def _make(name, readme_text):
+    def _make(name, readme_text, extra_files=None):
         counter["n"] += 1
         path = tmp_path / "sources" / name
         path.mkdir(parents=True)
@@ -26,6 +26,8 @@ def make_git_repo(tmp_path):
             (path / "README.md").write_text(readme_text)
         else:
             (path / "main.py").write_text("print('hello')\n")
+        for relpath, content in (extra_files or {}).items():
+            (path / relpath).write_text(content)
         _git(path, "add", "-A")
         _git(path, "commit", "-q", "-m", "initial")
         return path, _git(path, "rev-parse", "HEAD")
