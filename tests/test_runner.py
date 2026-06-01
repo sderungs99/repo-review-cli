@@ -84,3 +84,24 @@ def test_runs_tests_present_check_across_every_subject_repo(make_git_repo, write
     assert len(findings) == 1
     assert findings[0].check_id == "tests-present"
     assert findings[0].category == "testing"
+
+
+def test_runs_sonar_exclusions_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    path, sha = make_git_repo(
+        "payments-service",
+        SUBSTANTIAL,
+        extra_files={
+            "sonar-project.properties": "sonar.exclusions=src/generated/**\n",
+            **HAS_TESTS,
+        },
+    )
+    manifest = write_manifest([("payments-service", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # README is substantial and tests are present, so the only finding is the
+    # Sonar exclusion — and it survives the round-trip into the Findings File.
+    assert len(findings) == 1
+    assert findings[0].check_id == "sonar-exclusions"
+    assert findings[0].category == "sonar-integrity"
+    assert '"sonar-integrity"' in to_json(findings)
