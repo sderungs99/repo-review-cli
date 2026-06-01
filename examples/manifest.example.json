@@ -1,0 +1,14 @@
+{
+  "repos": [
+    {
+      "name": "payments-service",
+      "source": "/abs/path/to/checkouts/payments-service",
+      "sha": "0000000000000000000000000000000000000000"
+    },
+    {
+      "name": "auth-service",
+      "source": "https://example.com/vendor/auth-service.git",
+      "sha": "1111111111111111111111111111111111111111"
+    }
+  ]
+}
