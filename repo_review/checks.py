@@ -7,6 +7,7 @@ of (repo name, checkout path) returning zero or more Findings.
 
 import re
 from pathlib import Path
+from xml.etree import ElementTree
 
 from repo_review.finding import Finding, HIGH, MEDIUM, LOW, INFO
 
@@ -17,6 +18,8 @@ TODO_CHECK_ID = "todo-markers"
 LARGE_FILE_CHECK_ID = "large-file"
 
 TESTS_PRESENT_CHECK_ID = "tests-present"
+
+SONAR_EXCLUSIONS_CHECK_ID = "sonar-exclusions"
 
 # Markers matched only inside a comment (//, /* */, or a *-continuation line),
 # regardless of what follows them — "// TODO", "//TODO:", "* FIXME(JIRA-1)".
@@ -157,6 +160,130 @@ def _iter_source_files(checkout_path: Path):
         if _SKIP_DIRS.intersection(path.relative_to(checkout_path).parts):
             continue
         yield path
+
+# The Sonar exclusion keys we detect, mapped to a severity that reflects how
+# much each one hides from analysis. `sonar.exclusions` removes files from ALL
+# analysis (the strongest concealment); coverage/cpd/test exclusions narrow only
+# one dimension. Hardcoded editorial severities per ADR-0004.
+_SONAR_EXCLUSION_SEVERITY = {
+    "sonar.exclusions": HIGH,
+    "sonar.coverage.exclusions": MEDIUM,
+    "sonar.cpd.exclusions": LOW,
+    "sonar.test.exclusions": LOW,
+}
+
+
+def check_sonar_exclusions(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Flag Sonar exclusion settings configured in the Subject Repo's checkout.
+
+    Exclusions tell Sonar to ignore parts of the codebase, so the vendor's own
+    quality metrics never saw that code (ADR-0003). Read purely from config
+    files in the checkout, never the Sonar server (ADR-0007).
+    """
+    findings = []
+    properties = checkout_path / "sonar-project.properties"
+    if properties.is_file():
+        location = properties.relative_to(checkout_path).as_posix()
+        directives = _parse_properties(properties).items()
+        findings.extend(_findings_for(repo_name, location, directives))
+
+    pom = checkout_path / "pom.xml"
+    if pom.is_file():
+        location = pom.relative_to(checkout_path).as_posix()
+        directives = _parse_pom_exclusions(pom).items()
+        findings.extend(_findings_for(repo_name, location, directives))
+
+    for yaml in _iter_pipeline_files(checkout_path):
+        location = yaml.relative_to(checkout_path).as_posix()
+        directives = _parse_pipeline_exclusions(yaml).items()
+        findings.extend(_findings_for(repo_name, location, directives))
+
+    return findings
+
+
+def _findings_for(repo_name, location, directives):
+    """A finding per (key, patterns) directive whose key is an exclusion key."""
+    return [
+        _exclusion_finding(repo_name, location, key, value)
+        for key, value in directives
+        if key in _SONAR_EXCLUSION_SEVERITY
+    ]
+
+
+def _exclusion_finding(repo_name, location, key, patterns):
+    """One finding for a single (config file, exclusion key) directive."""
+    return Finding(
+        repo=repo_name,
+        check_id=SONAR_EXCLUSIONS_CHECK_ID,
+        category="sonar-integrity",
+        severity=_SONAR_EXCLUSION_SEVERITY[key],
+        evidence=f"Sonar {key} excludes {patterns} from analysis.",
+        location=location,
+    )
+
+
+def _parse_pom_exclusions(path: Path) -> dict[str, str]:
+    """Sonar exclusion keys configured as Maven properties in a pom.xml.
+
+    Maven drives Sonar through `<properties>`, e.g. `<sonar.exclusions>`. POMs
+    carry the Maven namespace, so elements are matched on their local tag name.
+    """
+    try:
+        root = ElementTree.parse(path).getroot()
+    except ElementTree.ParseError:
+        return {}
+    result = {}
+    for element in root.iter():
+        local = element.tag.rpartition("}")[2]
+        if local in _SONAR_EXCLUSION_SEVERITY and element.text:
+            result[local] = element.text.strip()
+    return result
+
+
+# An ADO pipeline step invoking a SonarQube/SonarCloud task. Exclusion lines are
+# only honoured as Sonar directives when the file actually wires up such a task,
+# so a stray `sonar.exclusions=` in an unrelated script line is not mistaken.
+_SONAR_TASK = re.compile(r"task:\s*Sonar(?:Qube|Cloud)\w*", re.IGNORECASE)
+
+# A `sonar.<...>exclusions=<patterns>` assignment, as it appears inside an ADO
+# task's `extraProperties` block (or a `-Dsonar...exclusions=` command line).
+_PIPELINE_EXCLUSION = re.compile(r"(sonar\.[\w.]*exclusions)\s*=\s*(\S.*?)\s*$")
+
+
+def _iter_pipeline_files(checkout_path: Path):
+    """YAML files under the checkout, in stable order, vendored dirs pruned."""
+    for path in sorted(checkout_path.rglob("*")):
+        if not (path.is_file() and path.suffix in {".yml", ".yaml"}):
+            continue
+        if _SKIP_DIRS.intersection(path.relative_to(checkout_path).parts):
+            continue
+        yield path
+
+
+def _parse_pipeline_exclusions(path: Path) -> dict[str, str]:
+    """Sonar exclusion assignments in a pipeline YAML that wires a Sonar task."""
+    text = path.read_text(errors="replace")
+    if not _SONAR_TASK.search(text):
+        return {}
+    result = {}
+    for line in text.splitlines():
+        match = _PIPELINE_EXCLUSION.search(line)
+        if match and match.group(1) in _SONAR_EXCLUSION_SEVERITY:
+            result[match.group(1)] = match.group(2)
+    return result
+
+
+def _parse_properties(path: Path) -> dict[str, str]:
+    """Parse a .properties file into key -> value (last write wins)."""
+    result = {}
+    for line in path.read_text(errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", "!")) or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        result[key.strip()] = value.strip()
+    return result
+
 
 # A README with fewer real words than this is treated as a stub, not real
 # documentation (e.g. a bare title plus "TODO").
