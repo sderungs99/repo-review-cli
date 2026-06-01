@@ -6,4 +6,4 @@ __pycache__/
 
 # Local review inputs/outputs — not part of the tool source
 /manifest.json
-/output-dir/
+/reports/

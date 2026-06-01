@@ -7,7 +7,7 @@ Runs the review and writes the canonical Findings File plus both reports
 """
 
 import argparse
-import shutil
+import tempfile
 from pathlib import Path
 
 from repo_review.findings_file import write_findings
@@ -17,25 +17,26 @@ from repo_review.runner import run_review
 FINDINGS_FILE = "findings.json"
 TECHNICAL_REPORT = "technical-findings-report.md"
 STAKEHOLDER_REPORT = "stakeholder-report.md"
+DEFAULT_OUT = Path("reports")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="repo_review")
     parser.add_argument("--manifest", required=True, type=Path,
                         help="Path to the SHA-pinned Manifest JSON.")
-    parser.add_argument("--out", required=True, type=Path,
-                        help="Output directory for findings and reports.")
+    parser.add_argument("--out", default=DEFAULT_OUT, type=Path,
+                        help="Output directory for findings and reports "
+                             f"(default: ./{DEFAULT_OUT}).")
     args = parser.parse_args(argv)
 
     out: Path = args.out
     out.mkdir(parents=True, exist_ok=True)
 
-    # Clean checkout area so the command is safely re-runnable into the same out.
-    workdir = out / "_checkouts"
-    if workdir.exists():
-        shutil.rmtree(workdir)
-
-    findings = run_review(args.manifest, workdir)
+    # Clone into a throwaway working area: the checkouts are disposable, only
+    # the findings and reports are durable. This keeps the output folder clean
+    # and makes the command safely re-runnable.
+    with tempfile.TemporaryDirectory(prefix="repo-review-checkouts-") as workdir:
+        findings = run_review(args.manifest, Path(workdir))
 
     write_findings(findings, out / FINDINGS_FILE)
     (out / TECHNICAL_REPORT).write_text(render_technical(findings))

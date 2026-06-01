@@ -38,10 +38,10 @@ network at analysis time and findings are written in a canonical order.
 ## Usage
 
 ```bash
-python -m repo_review --manifest path/to/manifest.json --out path/to/output-dir
+python -m repo_review --manifest path/to/manifest.json
 ```
 
-Writes into the output directory:
+Writes into `./reports/` (override with `--out <dir>`):
 
 - `findings.json` — the canonical Findings File
 - `technical-findings-report.md`
