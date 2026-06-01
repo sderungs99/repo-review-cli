@@ -44,6 +44,19 @@ def test_writes_to_reports_dir_by_default_without_out(
     assert (tmp_path / "reports" / "stakeholder-report.md").exists()
 
 
+def test_reads_manifest_json_from_cwd_by_default(
+    make_git_repo, write_manifest, tmp_path, monkeypatch
+):
+    bare, bare_sha = make_git_repo("auth-service", None)
+    write_manifest([("auth-service", bare, bare_sha)])  # writes ./manifest.json
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main([])
+
+    assert exit_code == 0
+    assert (tmp_path / "reports" / "findings.json").exists()
+
+
 def test_output_dir_contains_only_deliverables(make_git_repo, write_manifest, tmp_path):
     bare, bare_sha = make_git_repo("auth-service", None)
     manifest = write_manifest([("auth-service", bare, bare_sha)])

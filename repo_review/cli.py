@@ -17,13 +17,15 @@ from repo_review.runner import run_review
 FINDINGS_FILE = "findings.json"
 TECHNICAL_REPORT = "technical-findings-report.md"
 STAKEHOLDER_REPORT = "stakeholder-report.md"
+DEFAULT_MANIFEST = Path("manifest.json")
 DEFAULT_OUT = Path("reports")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="repo_review")
-    parser.add_argument("--manifest", required=True, type=Path,
-                        help="Path to the SHA-pinned Manifest JSON.")
+    parser.add_argument("--manifest", default=DEFAULT_MANIFEST, type=Path,
+                        help="Path to the SHA-pinned Manifest JSON "
+                             f"(default: ./{DEFAULT_MANIFEST}).")
     parser.add_argument("--out", default=DEFAULT_OUT, type=Path,
                         help="Output directory for findings and reports "
                              f"(default: ./{DEFAULT_OUT}).")
