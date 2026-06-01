@@ -49,3 +49,18 @@ def test_runs_todo_marker_check_across_every_subject_repo(make_git_repo, write_m
     assert len(findings) == 1
     assert findings[0].check_id == "todo-markers"
     assert findings[0].category == "code-hygiene"
+
+
+def test_runs_large_file_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    huge = "\n".join("x" for _ in range(1001)) + "\n"
+    path, sha = make_git_repo(
+        "payments-service", SUBSTANTIAL, extra_files={"Big.java": huge}
+    )
+    manifest = write_manifest([("payments-service", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # README is substantial, so the only finding is the oversized file.
+    assert len(findings) == 1
+    assert findings[0].check_id == "large-file"
+    assert findings[0].location == "Big.java"
