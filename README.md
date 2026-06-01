@@ -37,11 +37,19 @@ network at analysis time and findings are written in a canonical order.
 
 ## Usage
 
+With a `manifest.json` in the current directory:
+
 ```bash
-python -m repo_review --manifest path/to/manifest.json --out path/to/output-dir
+python -m repo_review
 ```
 
-Writes into the output directory:
+Or point at explicit paths:
+
+```bash
+python -m repo_review --manifest path/to/manifest.json --out path/to/dir
+```
+
+Defaults: `--manifest ./manifest.json`, `--out ./reports/`. Writes:
 
 - `findings.json` — the canonical Findings File
 - `technical-findings-report.md`
@@ -51,7 +59,7 @@ Writes into the output directory:
 
 A JSON object with a `repos` array; each entry is a Subject Repo pinned to a SHA.
 `source` may be any git URL or a local path. See
-[`examples/manifest.example.json`](examples/manifest.example.json):
+[`manifest.example.json`](manifest.example.json):
 
 ```json
 {

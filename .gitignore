@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
+
+# Local review inputs/outputs — not part of the tool source
+/manifest.json
+/reports/
