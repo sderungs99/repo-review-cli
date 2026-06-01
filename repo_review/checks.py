@@ -16,6 +16,8 @@ TODO_CHECK_ID = "todo-markers"
 
 LARGE_FILE_CHECK_ID = "large-file"
 
+TESTS_PRESENT_CHECK_ID = "tests-present"
+
 # Markers matched only inside a comment (//, /* */, or a *-continuation line),
 # regardless of what follows them — "// TODO", "//TODO:", "* FIXME(JIRA-1)".
 _TODO_MARKER = re.compile(
@@ -98,6 +100,49 @@ def check_large_files(repo_name: str, checkout_path: Path) -> list[Finding]:
             location=relative,
         ))
     return findings
+
+
+def check_tests_present(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Does the Subject Repo contain a test suite at all? (presence only)."""
+    if _has_test_tree(checkout_path):
+        return []
+    return [Finding(
+        repo=repo_name,
+        check_id=TESTS_PRESENT_CHECK_ID,
+        category="testing",
+        severity=HIGH,
+        evidence=(
+            "Looked for an ecosystem test tree (Java/Maven src/test/**, "
+            "React/React Native *.test.* / *.spec.* files or a __tests__/ "
+            "directory); found none."
+        ),
+        location=".",
+    )]
+
+
+def _has_test_tree(checkout_path: Path) -> bool:
+    """Any ecosystem's test-tree signal present in the repo's own source?"""
+    for path in checkout_path.rglob("*"):
+        relative_parts = path.relative_to(checkout_path).parts
+        if _SKIP_DIRS.intersection(relative_parts):
+            continue
+        if _is_test_signal(relative_parts):
+            return True
+    return False
+
+
+def _is_test_signal(relative_parts: tuple[str, ...]) -> bool:
+    """Does this repo-relative path match an ecosystem test-tree convention?"""
+    # Java / Maven: a src/test/** tree.
+    for i in range(len(relative_parts) - 1):
+        if relative_parts[i] == "src" and relative_parts[i + 1] == "test":
+            return True
+    # React / React Native: a __tests__/ directory anywhere.
+    if "__tests__" in relative_parts:
+        return True
+    # React / React Native: a *.test.* / *.spec.* file.
+    name = relative_parts[-1]
+    return ".test." in name or ".spec." in name
 
 
 def _iter_source_files(checkout_path: Path):
