@@ -14,6 +14,8 @@ README_CHECK_ID = "readme-presence"
 
 TODO_CHECK_ID = "todo-markers"
 
+LARGE_FILE_CHECK_ID = "large-file"
+
 # Markers matched only inside a comment (//, /* */, or a *-continuation line),
 # regardless of what follows them — "// TODO", "//TODO:", "* FIXME(JIRA-1)".
 _TODO_MARKER = re.compile(
@@ -63,6 +65,39 @@ def check_todo_markers(repo_name: str, checkout_path: Path) -> list[Finding]:
         ),
         location=".",
     )]
+
+
+# A source file longer than this is flagged as a maintainability signal. Pure
+# physical-line count (blanks and comments included); the threshold is calibrated
+# for that. Hardcoded per ADR-0004.
+LARGE_FILE_LOC_THRESHOLD = 1000
+
+# A file at or beyond twice the threshold is a far stronger maintainability
+# signal, so it is escalated from Low to Medium.
+LARGE_FILE_MEDIUM_LOC_THRESHOLD = 2 * LARGE_FILE_LOC_THRESHOLD
+
+
+def check_large_files(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Flag Subject Repo source files whose LOC exceeds the threshold."""
+    findings = []
+    for source in _iter_source_files(checkout_path):
+        loc = len(source.read_text(errors="replace").splitlines())
+        if loc <= LARGE_FILE_LOC_THRESHOLD:
+            continue
+        relative = source.relative_to(checkout_path).as_posix()
+        severity = MEDIUM if loc >= LARGE_FILE_MEDIUM_LOC_THRESHOLD else LOW
+        findings.append(Finding(
+            repo=repo_name,
+            check_id=LARGE_FILE_CHECK_ID,
+            category="code-hygiene",
+            severity=severity,
+            evidence=(
+                f"{relative} is {loc} LOC, over the "
+                f"{LARGE_FILE_LOC_THRESHOLD}-LOC threshold."
+            ),
+            location=relative,
+        ))
+    return findings
 
 
 def _iter_source_files(checkout_path: Path):
