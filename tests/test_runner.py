@@ -126,3 +126,55 @@ def test_runs_secret_scanning_check_across_every_subject_repo(make_git_repo, wri
     assert findings[0].check_id == "secret-scanning"
     assert findings[0].category == "security"
     assert '"security"' in to_json(findings)
+
+
+def test_runs_layering_violation_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    controller = (
+        "@RestController\npublic class OrderController {\n"
+        "    private final OrderRepository orders;\n}\n"
+    )
+    path, sha = make_git_repo(
+        "payments-service",
+        SUBSTANTIAL,
+        extra_files={"OrderController.java": controller, **HAS_TESTS},
+    )
+    manifest = write_manifest([("payments-service", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # README is substantial and tests are present, so the only finding is the
+    # layering violation — and the new category survives into the Findings File.
+    assert len(findings) == 1
+    assert findings[0].check_id == "layering-violation"
+    assert findings[0].category == "architecture"
+    assert '"architecture"' in to_json(findings)
+
+
+def test_runs_god_class_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    fields = "\n".join(f"    private final Dep{i} dep{i};" for i in range(10))
+    god = "public class OrderService {\n" + fields + "\n}\n"
+    path, sha = make_git_repo(
+        "payments-service", SUBSTANTIAL, extra_files={"OrderService.java": god, **HAS_TESTS}
+    )
+    manifest = write_manifest([("payments-service", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "god-class"
+    assert findings[0].category == "architecture"
+
+
+def test_runs_suppression_density_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    path, sha = make_git_repo(
+        "web-frontend",
+        SUBSTANTIAL,
+        extra_files={"a.ts": "// @ts-ignore\nconst x = 1;\n", **HAS_TESTS},
+    )
+    manifest = write_manifest([("web-frontend", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "suppression-density"
+    assert findings[0].category == "code-hygiene"
