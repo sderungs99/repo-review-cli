@@ -126,3 +126,24 @@ def test_runs_secret_scanning_check_across_every_subject_repo(make_git_repo, wri
     assert findings[0].check_id == "secret-scanning"
     assert findings[0].category == "security"
     assert '"security"' in to_json(findings)
+
+
+def test_runs_snapshot_prerelease_deps_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    pom = (
+        '<project xmlns="http://maven.apache.org/POM/4.0.0">\n'
+        "  <dependencies>\n    <dependency>\n"
+        "      <groupId>com.acme</groupId>\n"
+        "      <artifactId>billing</artifactId>\n"
+        "      <version>1.4.0-SNAPSHOT</version>\n"
+        "    </dependency>\n  </dependencies>\n</project>\n"
+    )
+    path, sha = make_git_repo(
+        "payments-service", SUBSTANTIAL, extra_files={"pom.xml": pom, **HAS_TESTS}
+    )
+    manifest = write_manifest([("payments-service", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "snapshot-prerelease-deps"
+    assert findings[0].category == "dependencies"

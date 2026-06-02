@@ -13,6 +13,7 @@ from repo_review.checks import (
     check_large_files,
     check_readme_presence,
     check_secrets,
+    check_snapshot_prerelease_deps,
     check_sonar_exclusions,
     check_tests_present,
     check_todo_markers,
@@ -32,4 +33,5 @@ def run_review(manifest_path: Path, workdir: Path) -> list[Finding]:
         findings.extend(check_tests_present(entry.name, checkout))
         findings.extend(check_sonar_exclusions(entry.name, checkout))
         findings.extend(check_secrets(entry.name, checkout))
+        findings.extend(check_snapshot_prerelease_deps(entry.name, checkout))
     return findings

@@ -5,7 +5,9 @@ Checks are hardcoded (ADR-0004) and read only the source tree and config
 of (repo name, checkout path) returning zero or more Findings.
 """
 
+import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -22,6 +24,8 @@ TESTS_PRESENT_CHECK_ID = "tests-present"
 SONAR_EXCLUSIONS_CHECK_ID = "sonar-exclusions"
 
 SECRETS_CHECK_ID = "secret-scanning"
+
+SNAPSHOT_PRERELEASE_DEPS_CHECK_ID = "snapshot-prerelease-deps"
 
 # Markers matched only inside a comment (//, /* */, or a *-continuation line),
 # regardless of what follows them — "// TODO", "//TODO:", "* FIXME(JIRA-1)".
@@ -437,3 +441,125 @@ def _is_binary(path: Path) -> bool:
     """Heuristic: treat a file with a NUL byte in its first chunk as binary."""
     with path.open("rb") as handle:
         return b"\x00" in handle.read(_BINARY_SNIFF_BYTES)
+
+
+# A single dependency as declared in a manifest.
+@dataclass(frozen=True)
+class _DeclaredDep:
+    coordinate: str  # "group:artifact" (Maven) or package name (npm)
+    version: str     # raw version string as declared; may be "" or a ${property}
+
+
+def check_snapshot_prerelease_deps(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Flag dependencies pinned to a SNAPSHOT or pre-release (alpha/beta/RC) version."""
+    findings = []
+    for location, deps in _iter_declared_dependencies(checkout_path):
+        for dep in deps:
+            if _is_prerelease_version(dep.version):
+                findings.append(Finding(
+                    repo=repo_name,
+                    check_id=SNAPSHOT_PRERELEASE_DEPS_CHECK_ID,
+                    category="dependencies",
+                    severity=MEDIUM,
+                    evidence=(
+                        f"Dependency {dep.coordinate} pins a SNAPSHOT/pre-release "
+                        f"version ({dep.version}); not a reproducible production build."
+                    ),
+                    location=location,
+                ))
+    return findings
+
+
+# A SNAPSHOT or pre-release qualifier (alpha/beta/RC, optionally numbered) on a
+# version: `1.2.3-SNAPSHOT`, `2.0.0-beta`, `1.5.0.RC2`. A plain `1.2.3` (or a
+# `${property}` reference) is a release pin and is not matched.
+_PRERELEASE_VERSION = re.compile(r"(?i)[-.](?:snapshot|alpha|beta|rc)\d*\b")
+
+
+def _is_prerelease_version(version: str) -> bool:
+    """Is this version string a SNAPSHOT or alpha/beta/RC pre-release?"""
+    return bool(_PRERELEASE_VERSION.search(version))
+
+
+def _iter_declared_dependencies(checkout_path: Path):
+    """Per dependency manifest under the checkout, its (location, declared deps).
+
+    Maven `pom.xml` and npm `package.json` only; in stable path-sorted order with
+    vendored/build dirs pruned. Read purely from the manifest, never resolved or
+    fetched (ADR-0007).
+    """
+    for path in sorted(checkout_path.rglob("*")):
+        if not path.is_file():
+            continue
+        if _SKIP_DIRS.intersection(path.relative_to(checkout_path).parts):
+            continue
+        location = path.relative_to(checkout_path).as_posix()
+        if path.name == "pom.xml":
+            yield location, _parse_pom_dependencies(path)
+        elif path.name == "package.json":
+            yield location, _parse_package_json(path)
+
+
+def _parse_pom_dependencies(path: Path) -> list[_DeclaredDep]:
+    """Dependencies declared in a pom.xml (anywhere a `<dependency>` appears).
+
+    POMs carry the Maven namespace, so elements are matched on their local tag
+    name.
+    """
+    try:
+        root = ElementTree.parse(path).getroot()
+    except ElementTree.ParseError:
+        return []
+    deps = []
+    for element in root.iter():
+        if _local_name(element.tag) != "dependency":
+            continue
+        group = artifact = version = ""
+        for child in element:
+            local = _local_name(child.tag)
+            text = (child.text or "").strip()
+            if local == "groupId":
+                group = text
+            elif local == "artifactId":
+                artifact = text
+            elif local == "version":
+                version = text
+        if not artifact:
+            continue
+        coordinate = f"{group}:{artifact}" if group else artifact
+        deps.append(_DeclaredDep(coordinate=coordinate, version=version))
+    return deps
+
+
+# The npm manifest sections that declare dependencies, in a stable order.
+_NPM_DEPENDENCY_BLOCKS = (
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+)
+
+
+def _parse_package_json(path: Path) -> list[_DeclaredDep]:
+    """Dependencies declared across a package.json's dependency sections."""
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    deps = []
+    for block in _NPM_DEPENDENCY_BLOCKS:
+        section = data.get(block)
+        if not isinstance(section, dict):
+            continue
+        for name, version in section.items():
+            if not isinstance(version, str):
+                continue
+            deps.append(_DeclaredDep(coordinate=name, version=version.strip()))
+    return deps
+
+
+def _local_name(tag: str) -> str:
+    """The local name of a possibly namespaced XML tag (`{ns}foo` -> `foo`)."""
+    return tag.rpartition("}")[2]
