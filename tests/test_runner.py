@@ -105,3 +105,24 @@ def test_runs_sonar_exclusions_check_across_every_subject_repo(make_git_repo, wr
     assert findings[0].check_id == "sonar-exclusions"
     assert findings[0].category == "sonar-integrity"
     assert '"sonar-integrity"' in to_json(findings)
+
+
+def test_runs_secret_scanning_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    path, sha = make_git_repo(
+        "payments-service",
+        SUBSTANTIAL,
+        extra_files={
+            ".env": "GITHUB_TOKEN=ghp_0123456789abcdefABCDEF0123456789abcd\n",
+            **HAS_TESTS,
+        },
+    )
+    manifest = write_manifest([("payments-service", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # README is substantial and tests are present, so the only finding is the
+    # committed secret — and it survives the round-trip into the Findings File.
+    assert len(findings) == 1
+    assert findings[0].check_id == "secret-scanning"
+    assert findings[0].category == "security"
+    assert '"security"' in to_json(findings)

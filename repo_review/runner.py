@@ -12,6 +12,7 @@ from repo_review.acquire import acquire_repo
 from repo_review.checks import (
     check_large_files,
     check_readme_presence,
+    check_secrets,
     check_sonar_exclusions,
     check_tests_present,
     check_todo_markers,
@@ -30,4 +31,5 @@ def run_review(manifest_path: Path, workdir: Path) -> list[Finding]:
         findings.extend(check_large_files(entry.name, checkout))
         findings.extend(check_tests_present(entry.name, checkout))
         findings.extend(check_sonar_exclusions(entry.name, checkout))
+        findings.extend(check_secrets(entry.name, checkout))
     return findings
