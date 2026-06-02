@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from xml.etree import ElementTree
 
-from repo_review.finding import Finding, HIGH, MEDIUM, LOW, INFO
+from repo_review.finding import Finding, CRITICAL, HIGH, MEDIUM, LOW, INFO
 
 README_CHECK_ID = "readme-presence"
 
@@ -20,6 +20,8 @@ LARGE_FILE_CHECK_ID = "large-file"
 TESTS_PRESENT_CHECK_ID = "tests-present"
 
 SONAR_EXCLUSIONS_CHECK_ID = "sonar-exclusions"
+
+SECRETS_CHECK_ID = "secret-scanning"
 
 # Markers matched only inside a comment (//, /* */, or a *-continuation line),
 # regardless of what follows them — "// TODO", "//TODO:", "* FIXME(JIRA-1)".
@@ -324,3 +326,114 @@ def _find_readme(checkout_path: Path) -> Path | None:
         if child.is_file() and child.stem.lower() == "readme":
             return child
     return None
+
+
+# (kind, compiled pattern, editorial severity). Each entry is a high-confidence
+# structural signature for a committed secret; severity is editorial per the kind
+# of credential exposed (ADR-0004). The full matched value is never reported —
+# only the kind and the file:line locate it.
+_SECRET_PATTERNS = [
+    ("private key", re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----"), CRITICAL),
+    ("AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b"), HIGH),
+    ("GitHub token", re.compile(r"\bgh[pousr]_[0-9A-Za-z]{36}\b"), HIGH),
+    ("Slack token", re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b"), HIGH),
+]
+
+# A config assignment whose key names a credential, capturing the assigned value.
+# Matched case-insensitively on the keyword sitting immediately before the `=`/`:`
+# separator, so apiKey / api_key / API_KEY all qualify but an unrelated key does
+# not. Severity is Medium: the key proves intent but the value is unverifiable.
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?i)(?:password|passwd|pwd|secret|api[_-]?key|apikey|"
+    r"access[_-]?key|access[_-]?token|token)\s*[:=]\s*(.+)$"
+)
+
+# Values that are plainly not a committed secret: a known placeholder word or a
+# `your_..._here`-style template. Interpolations (${...}, {{...}}, <...>) and
+# too-short values are screened separately.
+_PLACEHOLDER_VALUE = re.compile(
+    r"(?i)^(?:change[-_]?me|password|secret|example|sample|test|dummy|"
+    r"none|null|todo|tbd|x+|\*+|your[_-].*)$"
+)
+
+# Below this length a captured value carries too little signal to be a real
+# credential, so it is not flagged (screens empties and trivial stubs).
+_GENERIC_CREDENTIAL_MIN_LEN = 6
+
+
+def check_secrets(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Scan a Subject Repo's checkout for committed secrets (ADR-0007: local only)."""
+    findings = []
+    for source in _iter_text_files(checkout_path):
+        relative = source.relative_to(checkout_path).as_posix()
+        for lineno, line in enumerate(source.read_text(errors="replace").splitlines(), 1):
+            matched = False
+            for kind, pattern, severity in _SECRET_PATTERNS:
+                if pattern.search(line):
+                    findings.append(
+                        _secret_finding(repo_name, kind, severity, relative, lineno))
+                    matched = True
+            # A high-confidence structural match supersedes the generic key=value
+            # rule, so a line like `GITHUB_TOKEN=ghp_...` yields a single finding.
+            if not matched and _is_committed_credential(line):
+                findings.append(
+                    _secret_finding(repo_name, "credential", MEDIUM, relative, lineno))
+    return findings
+
+
+def _secret_finding(repo_name, kind, severity, location, lineno):
+    """A security Finding that locates a secret by kind and file:line, never value."""
+    return Finding(
+        repo=repo_name,
+        check_id=SECRETS_CHECK_ID,
+        category="security",
+        severity=severity,
+        evidence=f"Possible {kind} found at {location}:{lineno} (value redacted).",
+        location=location,
+    )
+
+
+def _is_committed_credential(line: str) -> bool:
+    """Does this line assign a real-looking value to a credential-named key?"""
+    match = _CREDENTIAL_ASSIGNMENT.search(line)
+    if not match:
+        return False
+    value = match.group(1).strip()
+    if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
+        value = value[1:-1].strip()
+    if len(value) < _GENERIC_CREDENTIAL_MIN_LEN:
+        return False
+    # A real secret is a single opaque token; whitespace means prose (a comment
+    # or doc note), not a committed credential.
+    if any(c.isspace() for c in value):
+        return False
+    if "${" in value or "{{" in value or (value.startswith("<") and value.endswith(">")):
+        return False
+    return not _PLACEHOLDER_VALUE.match(value)
+
+
+def _iter_text_files(checkout_path: Path):
+    """Text files under the checkout, in stable sorted order, vendored dirs pruned.
+
+    Binary files are skipped: bytes that happen to match a secret signature are
+    noise, not a committed credential.
+    """
+    for path in sorted(checkout_path.rglob("*")):
+        if not path.is_file():
+            continue
+        if _SKIP_DIRS.intersection(path.relative_to(checkout_path).parts):
+            continue
+        if _is_binary(path):
+            continue
+        yield path
+
+
+# A NUL byte in the leading chunk is the conventional binary-file signal; text
+# files (the only place a credential can be committed in readable form) have none.
+_BINARY_SNIFF_BYTES = 8192
+
+
+def _is_binary(path: Path) -> bool:
+    """Heuristic: treat a file with a NUL byte in its first chunk as binary."""
+    with path.open("rb") as handle:
+        return b"\x00" in handle.read(_BINARY_SNIFF_BYTES)
