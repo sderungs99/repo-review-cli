@@ -21,6 +21,10 @@ TESTS_PRESENT_CHECK_ID = "tests-present"
 
 SONAR_EXCLUSIONS_CHECK_ID = "sonar-exclusions"
 
+REACT_DANGEROUS_HTML_CHECK_ID = "react-dangerous-html"
+
+SQL_STRING_CONCAT_CHECK_ID = "sql-string-concat"
+
 SECRETS_CHECK_ID = "secret-scanning"
 
 # Markers matched only inside a comment (//, /* */, or a *-continuation line),
@@ -437,3 +441,69 @@ def _is_binary(path: Path) -> bool:
     """Heuristic: treat a file with a NUL byte in its first chunk as binary."""
     with path.open("rb") as handle:
         return b"\x00" in handle.read(_BINARY_SNIFF_BYTES)
+
+
+# React's escape hatch that injects raw HTML into the DOM, bypassing JSX's
+# automatic escaping. Every use is an XSS surface that must be manually audited,
+# so each occurrence is surfaced individually by file:line. Editorial Medium per
+# ADR-0004: a real risk, but one that may be deliberate and sanitised upstream.
+_DANGEROUS_HTML = re.compile(r"\bdangerouslySetInnerHTML\b")
+
+
+def check_react_dangerous_html(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Flag dangerouslySetInnerHTML usage in a Subject Repo's front-end source."""
+    findings = []
+    for source in _iter_source_files(checkout_path):
+        relative = source.relative_to(checkout_path).as_posix()
+        for lineno, line in enumerate(source.read_text(errors="replace").splitlines(), 1):
+            if _DANGEROUS_HTML.search(line):
+                findings.append(Finding(
+                    repo=repo_name,
+                    check_id=REACT_DANGEROUS_HTML_CHECK_ID,
+                    category="security",
+                    severity=MEDIUM,
+                    evidence=(
+                        f"dangerouslySetInnerHTML at {relative}:{lineno} injects raw "
+                        f"HTML, bypassing JSX escaping (XSS surface to audit)."
+                    ),
+                    location=relative,
+                ))
+    return findings
+
+
+# A string literal containing a SQL DML statement. The verb (and its object, for
+# INSERT/DELETE/MERGE) proves the literal is a query rather than incidental prose,
+# which keeps the concatenation signal below precise. Word boundaries stop
+# "SELECTED"/"UPDATED" from matching.
+_SQL_STATEMENT_LITERAL = re.compile(
+    r'"[^"]*\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\b[^"]*"',
+    re.IGNORECASE,
+)
+
+# String concatenation: a `+` directly adjacent to a string literal's quote.
+# Paired with a SQL-statement literal on the same line, this is the classic
+# injection-prone `"... WHERE id = " + var` construction. A parameterised query
+# (`"... WHERE id = ?"` with no concatenation) carries no `+` and is not flagged.
+_STRING_CONCAT = re.compile(r'"\s*\+|\+\s*"')
+
+
+def check_sql_string_concat(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Flag SQL queries assembled by string concatenation (injection risk)."""
+    findings = []
+    for source in _iter_source_files(checkout_path):
+        relative = source.relative_to(checkout_path).as_posix()
+        for lineno, line in enumerate(source.read_text(errors="replace").splitlines(), 1):
+            if _SQL_STATEMENT_LITERAL.search(line) and _STRING_CONCAT.search(line):
+                findings.append(Finding(
+                    repo=repo_name,
+                    check_id=SQL_STRING_CONCAT_CHECK_ID,
+                    category="security",
+                    severity=HIGH,
+                    evidence=(
+                        f"SQL query built by string concatenation at "
+                        f"{relative}:{lineno} (SQL-injection risk; use a "
+                        f"parameterised query)."
+                    ),
+                    location=relative,
+                ))
+    return findings
