@@ -1,0 +1,48 @@
+{
+  "dataset_version": "2026-05-01",
+  "source": "Hand-seeded subset of OSV (osv.dev) npm + Maven advisories. Replaced by the generated snapshot in a follow-up (see issue #6).",
+  "advisories": [
+    {
+      "ecosystem": "npm",
+      "package": "lodash",
+      "affected": ["4.17.19", "4.17.20"],
+      "cve": "CVE-2021-23337",
+      "cvss": 7.2
+    },
+    {
+      "ecosystem": "npm",
+      "package": "minimist",
+      "affected": ["1.2.5", "1.2.4", "1.2.3"],
+      "cve": "CVE-2021-44906",
+      "cvss": 9.8
+    },
+    {
+      "ecosystem": "npm",
+      "package": "axios",
+      "affected": ["0.21.0", "0.20.0"],
+      "cve": "CVE-2021-3749",
+      "cvss": 7.5
+    },
+    {
+      "ecosystem": "maven",
+      "package": "com.fasterxml.jackson.core:jackson-databind",
+      "affected": ["2.9.10.1", "2.9.10", "2.9.9"],
+      "cve": "CVE-2020-9546",
+      "cvss": 9.8
+    },
+    {
+      "ecosystem": "maven",
+      "package": "org.apache.logging.log4j:log4j-core",
+      "affected": ["2.14.1", "2.14.0", "2.13.3"],
+      "cve": "CVE-2021-44228",
+      "cvss": 10.0
+    },
+    {
+      "ecosystem": "maven",
+      "package": "org.springframework:spring-core",
+      "affected": ["5.3.17", "5.3.16"],
+      "cve": "CVE-2022-22965",
+      "cvss": 9.8
+    }
+  ]
+}

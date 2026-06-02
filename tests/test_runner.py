@@ -105,3 +105,27 @@ def test_runs_sonar_exclusions_check_across_every_subject_repo(make_git_repo, wr
     assert findings[0].check_id == "sonar-exclusions"
     assert findings[0].category == "sonar-integrity"
     assert '"sonar-integrity"' in to_json(findings)
+
+
+def test_runs_dependency_cves_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    # lodash 4.17.20 is in the bundled advisory snapshot (CVE-2021-23337).
+    lockfile = (
+        '{"lockfileVersion": 3, "packages": '
+        '{"node_modules/lodash": {"version": "4.17.20"}}}'
+    )
+    path, sha = make_git_repo(
+        "payments-service",
+        SUBSTANTIAL,
+        extra_files={"package-lock.json": lockfile, **HAS_TESTS},
+    )
+    manifest = write_manifest([("payments-service", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # README is substantial and tests are present, so the only finding is the
+    # vulnerable dependency, and it survives the round-trip into the Findings File.
+    assert len(findings) == 1
+    assert findings[0].check_id == "dependency-cves"
+    assert findings[0].category == "dependencies"
+    assert "CVE-2021-23337" in findings[0].evidence
+    assert '"dependencies"' in to_json(findings)

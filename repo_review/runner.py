@@ -9,7 +9,9 @@ deterministic given (checkouts + tool version): no network at analysis time
 from pathlib import Path
 
 from repo_review.acquire import acquire_repo
+from repo_review.advisories import default_dataset
 from repo_review.checks import (
+    check_dependency_cves,
     check_large_files,
     check_readme_presence,
     check_sonar_exclusions,
@@ -22,6 +24,9 @@ from repo_review.manifest import load_manifest
 
 def run_review(manifest_path: Path, workdir: Path) -> list[Finding]:
     """Run every check across every Subject Repo in the Manifest."""
+    # Load the pinned advisory snapshot once; the dependency check matches every
+    # repo against the same dataset, so a whole run is reproducible (ADR-0007).
+    advisories = default_dataset()
     findings: list[Finding] = []
     for entry in load_manifest(manifest_path):
         checkout = acquire_repo(entry, workdir)
@@ -30,4 +35,5 @@ def run_review(manifest_path: Path, workdir: Path) -> list[Finding]:
         findings.extend(check_large_files(entry.name, checkout))
         findings.extend(check_tests_present(entry.name, checkout))
         findings.extend(check_sonar_exclusions(entry.name, checkout))
+        findings.extend(check_dependency_cves(entry.name, checkout, advisories))
     return findings

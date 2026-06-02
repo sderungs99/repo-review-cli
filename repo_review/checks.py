@@ -5,11 +5,13 @@ Checks are hardcoded (ADR-0004) and read only the source tree and config
 of (repo name, checkout path) returning zero or more Findings.
 """
 
+import json
 import re
 from pathlib import Path
 from xml.etree import ElementTree
 
-from repo_review.finding import Finding, HIGH, MEDIUM, LOW, INFO
+from repo_review.advisories import AdvisoryDataset
+from repo_review.finding import Finding, CRITICAL, HIGH, MEDIUM, LOW, INFO
 
 README_CHECK_ID = "readme-presence"
 
@@ -20,6 +22,8 @@ LARGE_FILE_CHECK_ID = "large-file"
 TESTS_PRESENT_CHECK_ID = "tests-present"
 
 SONAR_EXCLUSIONS_CHECK_ID = "sonar-exclusions"
+
+DEPENDENCY_CVES_CHECK_ID = "dependency-cves"
 
 # Markers matched only inside a comment (//, /* */, or a *-continuation line),
 # regardless of what follows them — "// TODO", "//TODO:", "* FIXME(JIRA-1)".
@@ -324,3 +328,118 @@ def _find_readme(checkout_path: Path) -> Path | None:
         if child.is_file() and child.stem.lower() == "readme":
             return child
     return None
+
+
+def check_dependency_cves(
+    repo_name: str, checkout_path: Path, dataset: AdvisoryDataset
+) -> list[Finding]:
+    """Flag Subject Repo dependencies that match a known CVE in the snapshot.
+
+    Reads dependency manifests/lockfiles in the checkout and matches each
+    dependency's exact version against the pinned advisory dataset (ADR-0007).
+    The dataset version is recorded in every finding so a run is reproducible.
+    """
+    findings = []
+    dependencies = [*_npm_dependencies(checkout_path), *_maven_dependencies(checkout_path)]
+    for ecosystem, package, version in dependencies:
+        for advisory in dataset.matches(ecosystem, package, version):
+            findings.append(_cve_finding(repo_name, package, version, advisory, dataset))
+    return findings
+
+
+def _cve_finding(repo_name, package, version, advisory, dataset):
+    """One finding for a single (dependency, advisory) match."""
+    return Finding(
+        repo=repo_name,
+        check_id=DEPENDENCY_CVES_CHECK_ID,
+        category="dependencies",
+        severity=_severity_from_cvss(advisory.cvss),
+        evidence=(
+            f"{package} {version} is affected by {advisory.cve} "
+            f"(CVSS {advisory.cvss}). Matched against advisory dataset "
+            f"{dataset.version}."
+        ),
+        location=".",
+    )
+
+
+def _severity_from_cvss(cvss: float) -> str:
+    """Map a CVSS base score to the fixed 5-level scale (CVSS v3 bands)."""
+    if cvss >= 9.0:
+        return CRITICAL
+    if cvss >= 7.0:
+        return HIGH
+    if cvss >= 4.0:
+        return MEDIUM
+    if cvss > 0.0:
+        return LOW
+    return INFO
+
+
+def _npm_dependencies(checkout_path: Path):
+    """Yield (ecosystem, package, version) for an npm project.
+
+    Prefer package-lock.json when present: it pins exact resolved versions and
+    includes transitive dependencies. Fall back to the declared dependencies in
+    package.json, where only literal pins (not ``^``/``~`` ranges) can match,
+    since resolving a range needs a build (ADR-0002).
+    """
+    lock = checkout_path / "package-lock.json"
+    if lock.is_file():
+        data = _load_json(lock)
+        for key, entry in data.get("packages", {}).items():
+            if not key.startswith("node_modules/"):
+                continue
+            name = key.rpartition("node_modules/")[2]
+            version = entry.get("version")
+            if version:
+                yield "npm", name, version
+        return
+
+    manifest = checkout_path / "package.json"
+    if not manifest.is_file():
+        return
+    data = _load_json(manifest)
+    for section in ("dependencies", "devDependencies"):
+        for name, version in data.get(section, {}).items():
+            yield "npm", name, version
+
+
+def _load_json(path: Path) -> dict:
+    """Parse a JSON file, treating a malformed one as empty (never fatal).
+
+    A corrupt manifest in one Subject Repo must not abort the whole review,
+    mirroring the pom.xml ParseError guard.
+    """
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _maven_dependencies(checkout_path: Path):
+    """Yield (ecosystem, package, version) from a Maven pom.xml.
+
+    The package key is ``groupId:artifactId``. Only literal versions match;
+    a ``${property}`` placeholder can't be resolved without a build (ADR-0002).
+    """
+    pom = checkout_path / "pom.xml"
+    if not pom.is_file():
+        return
+    try:
+        root = ElementTree.parse(pom).getroot()
+    except ElementTree.ParseError:
+        return
+    for dependency in root.iter():
+        if dependency.tag.rpartition("}")[2] != "dependency":
+            continue
+        fields = {
+            child.tag.rpartition("}")[2]: (child.text or "").strip()
+            for child in dependency
+        }
+        group, artifact, version = (
+            fields.get("groupId"), fields.get("artifactId"), fields.get("version")
+        )
+        if group and artifact and version and not version.startswith("${"):
+            yield "maven", f"{group}:{artifact}", version
