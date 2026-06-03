@@ -161,3 +161,42 @@ def test_runs_assertion_free_tests_check_across_every_subject_repo(make_git_repo
     assert len(findings) == 1
     assert findings[0].check_id == "assertion-free-tests"
     assert findings[0].category == "testing"
+
+def test_runs_react_dangerous_html_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    path, sha = make_git_repo(
+        "web-frontend",
+        SUBSTANTIAL,
+        extra_files={
+            "Article.jsx": "const a = <div dangerouslySetInnerHTML={{ __html: h }} />;\n",
+            **HAS_TESTS,
+        },
+    )
+    manifest = write_manifest([("web-frontend", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # README is substantial and tests are present, so the only finding is the
+    # dangerouslySetInnerHTML usage.
+    assert len(findings) == 1
+    assert findings[0].check_id == "react-dangerous-html"
+    assert findings[0].category == "security"
+
+
+def test_runs_sql_string_concat_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    path, sha = make_git_repo(
+        "payments-service",
+        SUBSTANTIAL,
+        extra_files={
+            "UserDao.java": '    String sql = "SELECT * FROM users WHERE id = " + id;\n',
+            **HAS_TESTS,
+        },
+    )
+    manifest = write_manifest([("payments-service", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # README is substantial and tests are present, so the only finding is the
+    # concatenated SQL query.
+    assert len(findings) == 1
+    assert findings[0].check_id == "sql-string-concat"
+    assert findings[0].category == "security"
