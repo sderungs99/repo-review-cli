@@ -841,4 +841,3 @@ def _iter_java_files(checkout_path: Path):
     for source in _iter_source_files(checkout_path):
         if source.suffix == ".java":
             yield source
-    return tag.rpartition("}")[2]
