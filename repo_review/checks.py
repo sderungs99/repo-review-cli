@@ -29,6 +29,10 @@ GOD_CLASS_CHECK_ID = "god-class"
 
 SUPPRESSION_DENSITY_CHECK_ID = "suppression-density"
 
+DISABLED_TESTS_CHECK_ID = "disabled-tests"
+
+ASSERTION_FREE_TESTS_CHECK_ID = "assertion-free-tests"
+
 # Markers matched only inside a comment (//, /* */, or a *-continuation line),
 # regardless of what follows them — "// TODO", "//TODO:", "* FIXME(JIRA-1)".
 _TODO_MARKER = re.compile(

@@ -11,6 +11,8 @@ from pathlib import Path
 from repo_review.acquire import acquire_repo
 from repo_review.checks import (
     check_god_class,
+    check_assertion_free_tests,
+    check_disabled_tests,
     check_large_files,
     check_layering_violation,
     check_readme_presence,
@@ -38,4 +40,6 @@ def run_review(manifest_path: Path, workdir: Path) -> list[Finding]:
         findings.extend(check_layering_violation(entry.name, checkout))
         findings.extend(check_god_class(entry.name, checkout))
         findings.extend(check_suppression_density(entry.name, checkout))
+        findings.extend(check_disabled_tests(entry.name, checkout))
+        findings.extend(check_assertion_free_tests(entry.name, checkout))
     return findings
