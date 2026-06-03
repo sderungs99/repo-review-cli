@@ -7,8 +7,10 @@ SUBSTANTIAL = (
 )
 
 # A minimal test-tree signal, so the tests-present check stays silent and these
-# tests stay focused on the single check each is exercising.
-HAS_TESTS = {"App.test.js": "it('renders', () => {});\n"}
+# tests stay focused on the single check each is exercising. It carries an
+# assertion (and no disabled directive) so it also stays silent for the
+# disabled-tests and assertion-free-tests checks.
+HAS_TESTS = {"App.test.js": "it('renders', () => { expect(true).toBe(true); });\n"}
 
 
 def test_runs_readme_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):

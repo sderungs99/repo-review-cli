@@ -10,6 +10,8 @@ from pathlib import Path
 
 from repo_review.acquire import acquire_repo
 from repo_review.checks import (
+    check_assertion_free_tests,
+    check_disabled_tests,
     check_large_files,
     check_react_dangerous_html,
     check_readme_presence,
@@ -36,4 +38,6 @@ def run_review(manifest_path: Path, workdir: Path) -> list[Finding]:
         findings.extend(check_secrets(entry.name, checkout))
         findings.extend(check_react_dangerous_html(entry.name, checkout))
         findings.extend(check_sql_string_concat(entry.name, checkout))
+        findings.extend(check_disabled_tests(entry.name, checkout))
+        findings.extend(check_assertion_free_tests(entry.name, checkout))
     return findings
