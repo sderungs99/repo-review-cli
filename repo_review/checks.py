@@ -5,7 +5,9 @@ Checks are hardcoded (ADR-0004) and read only the source tree and config
 of (repo name, checkout path) returning zero or more Findings.
 """
 
+import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -21,6 +23,10 @@ TESTS_PRESENT_CHECK_ID = "tests-present"
 
 SONAR_EXCLUSIONS_CHECK_ID = "sonar-exclusions"
 
+REACT_DANGEROUS_HTML_CHECK_ID = "react-dangerous-html"
+
+SQL_STRING_CONCAT_CHECK_ID = "sql-string-concat"
+
 SECRETS_CHECK_ID = "secret-scanning"
 
 LAYERING_VIOLATION_CHECK_ID = "layering-violation"
@@ -28,6 +34,12 @@ LAYERING_VIOLATION_CHECK_ID = "layering-violation"
 GOD_CLASS_CHECK_ID = "god-class"
 
 SUPPRESSION_DENSITY_CHECK_ID = "suppression-density"
+
+SNAPSHOT_PRERELEASE_DEPS_CHECK_ID = "snapshot-prerelease-deps"
+
+DISABLED_TESTS_CHECK_ID = "disabled-tests"
+
+ASSERTION_FREE_TESTS_CHECK_ID = "assertion-free-tests"
 
 # Markers matched only inside a comment (//, /* */, or a *-continuation line),
 # regardless of what follows them — "// TODO", "//TODO:", "* FIXME(JIRA-1)".
@@ -443,6 +455,267 @@ def _is_binary(path: Path) -> bool:
     """Heuristic: treat a file with a NUL byte in its first chunk as binary."""
     with path.open("rb") as handle:
         return b"\x00" in handle.read(_BINARY_SNIFF_BYTES)
+
+
+# React's escape hatch that injects raw HTML into the DOM, bypassing JSX's
+# automatic escaping. Every use is an XSS surface that must be manually audited,
+# so each occurrence is surfaced individually by file:line. Editorial Medium per
+# ADR-0004: a real risk, but one that may be deliberate and sanitised upstream.
+_DANGEROUS_HTML = re.compile(r"\bdangerouslySetInnerHTML\b")
+
+
+def check_react_dangerous_html(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Flag dangerouslySetInnerHTML usage in a Subject Repo's front-end source."""
+    findings = []
+    for source in _iter_source_files(checkout_path):
+        relative = source.relative_to(checkout_path).as_posix()
+        for lineno, line in enumerate(source.read_text(errors="replace").splitlines(), 1):
+            if _DANGEROUS_HTML.search(line):
+                findings.append(Finding(
+                    repo=repo_name,
+                    check_id=REACT_DANGEROUS_HTML_CHECK_ID,
+                    category="security",
+                    severity=MEDIUM,
+                    evidence=(
+                        f"dangerouslySetInnerHTML at {relative}:{lineno} injects raw "
+                        f"HTML, bypassing JSX escaping (XSS surface to audit)."
+                    ),
+                    location=relative,
+                ))
+    return findings
+
+
+# A string literal containing a SQL DML statement. The verb (and its object, for
+# INSERT/DELETE/MERGE) proves the literal is a query rather than incidental prose,
+# which keeps the concatenation signal below precise. Word boundaries stop
+# "SELECTED"/"UPDATED" from matching.
+_SQL_STATEMENT_LITERAL = re.compile(
+    r'"[^"]*\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\b[^"]*"',
+    re.IGNORECASE,
+)
+
+# String concatenation: a `+` directly adjacent to a string literal's quote.
+# Paired with a SQL-statement literal on the same line, this is the classic
+# injection-prone `"... WHERE id = " + var` construction. A parameterised query
+# (`"... WHERE id = ?"` with no concatenation) carries no `+` and is not flagged.
+_STRING_CONCAT = re.compile(r'"\s*\+|\+\s*"')
+
+
+def check_sql_string_concat(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Flag SQL queries assembled by string concatenation (injection risk)."""
+    findings = []
+    for source in _iter_source_files(checkout_path):
+        relative = source.relative_to(checkout_path).as_posix()
+        for lineno, line in enumerate(source.read_text(errors="replace").splitlines(), 1):
+            if _SQL_STATEMENT_LITERAL.search(line) and _STRING_CONCAT.search(line):
+                findings.append(Finding(
+                    repo=repo_name,
+                    check_id=SQL_STRING_CONCAT_CHECK_ID,
+                    category="security",
+                    severity=HIGH,
+                    evidence=(
+                        f"SQL query built by string concatenation at "
+                        f"{relative}:{lineno} (SQL-injection risk; use a "
+                        f"parameterised query)."
+                    ),
+                    location=relative,
+                ))
+    return findings
+
+
+# A directive that switches tests off or narrows the run, so the suite no longer
+# exercises what it appears to: JUnit's @Disabled/@Ignore, Jest/Jasmine's
+# x-prefixed blocks, and the `.skip`/`.only` modifiers. A committed `.only`
+# silently skips the rest of the suite, so it belongs here too.
+_DISABLED_TEST = re.compile(
+    r"@Disabled\b|@Ignore\b"
+    r"|\bxit\b|\bxdescribe\b|\bxtest\b"
+    r"|\b(?:it|describe|test)\.(?:skip|only)\b"
+)
+
+
+def check_disabled_tests(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Flag tests that are committed in a disabled, skipped, or focused state."""
+    findings = []
+    for source in _iter_test_files(checkout_path):
+        relative = source.relative_to(checkout_path).as_posix()
+        for lineno, line in enumerate(source.read_text(errors="replace").splitlines(), 1):
+            match = _DISABLED_TEST.search(line)
+            if match:
+                findings.append(Finding(
+                    repo=repo_name,
+                    check_id=DISABLED_TESTS_CHECK_ID,
+                    category="testing",
+                    severity=MEDIUM,
+                    evidence=(
+                        f"Disabled/skipped/focused test directive '{match.group(0)}' "
+                        f"at {relative}:{lineno}; part of the suite is not exercised."
+                    ),
+                    location=relative,
+                ))
+    return findings
+
+
+# A test case: a JUnit @Test method or a Jest/Jasmine it()/test() block. Disabled
+# forms (`xit`, `@Disabled`) are deliberately not matched here — a file whose only
+# cases are disabled is the disabled-tests check's concern, not this one.
+_TEST_CASE = re.compile(r"@Test\b|\b(?:it|test)\s*\(")
+
+# Any sign a test actually verifies something: a Jest/Chai `expect(`, a JUnit/
+# AssertJ `assert…`, a Mockito `verify(`, or a Chai `should`. Read loosely on
+# purpose — the goal is to clear files that assert *somehow*, not to grade how.
+_ASSERTION = re.compile(r"\bexpect\s*\(|\bassert|\bverify\s*\(|\bshould\b", re.IGNORECASE)
+
+
+def check_assertion_free_tests(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Flag test files that define test cases but contain no assertions (heuristic)."""
+    findings = []
+    for source in _iter_test_files(checkout_path):
+        text = source.read_text(errors="replace")
+        if not _TEST_CASE.search(text) or _ASSERTION.search(text):
+            continue
+        relative = source.relative_to(checkout_path).as_posix()
+        findings.append(Finding(
+            repo=repo_name,
+            check_id=ASSERTION_FREE_TESTS_CHECK_ID,
+            category="testing",
+            severity=LOW,
+            evidence=(
+                f"Test file {relative} defines test case(s) but contains no "
+                f"assertion (expect/assert/verify); it may not verify behaviour."
+            ),
+            location=relative,
+        ))
+    return findings
+
+
+def _iter_test_files(checkout_path: Path):
+    """Source files that match an ecosystem test-tree convention, in stable order."""
+    for source in _iter_source_files(checkout_path):
+        if _is_test_signal(source.relative_to(checkout_path).parts):
+            yield source
+
+
+# A single dependency as declared in a manifest.
+@dataclass(frozen=True)
+class _DeclaredDep:
+    coordinate: str  # "group:artifact" (Maven) or package name (npm)
+    version: str     # raw version string as declared; may be "" or a ${property}
+
+
+def check_snapshot_prerelease_deps(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Flag dependencies pinned to a SNAPSHOT or pre-release (alpha/beta/RC) version."""
+    findings = []
+    for location, deps in _iter_declared_dependencies(checkout_path):
+        for dep in deps:
+            if _is_prerelease_version(dep.version):
+                findings.append(Finding(
+                    repo=repo_name,
+                    check_id=SNAPSHOT_PRERELEASE_DEPS_CHECK_ID,
+                    category="dependencies",
+                    severity=MEDIUM,
+                    evidence=(
+                        f"Dependency {dep.coordinate} pins a SNAPSHOT/pre-release "
+                        f"version ({dep.version}); not a reproducible production build."
+                    ),
+                    location=location,
+                ))
+    return findings
+
+
+# A SNAPSHOT or pre-release qualifier (alpha/beta/RC, optionally numbered) on a
+# version: `1.2.3-SNAPSHOT`, `2.0.0-beta`, `1.5.0.RC2`. A plain `1.2.3` (or a
+# `${property}` reference) is a release pin and is not matched.
+_PRERELEASE_VERSION = re.compile(r"(?i)[-.](?:snapshot|alpha|beta|rc)\d*\b")
+
+
+def _is_prerelease_version(version: str) -> bool:
+    """Is this version string a SNAPSHOT or alpha/beta/RC pre-release?"""
+    return bool(_PRERELEASE_VERSION.search(version))
+
+
+def _iter_declared_dependencies(checkout_path: Path):
+    """Per dependency manifest under the checkout, its (location, declared deps).
+
+    Maven `pom.xml` and npm `package.json` only; in stable path-sorted order with
+    vendored/build dirs pruned. Read purely from the manifest, never resolved or
+    fetched (ADR-0007).
+    """
+    for path in sorted(checkout_path.rglob("*")):
+        if not path.is_file():
+            continue
+        if _SKIP_DIRS.intersection(path.relative_to(checkout_path).parts):
+            continue
+        location = path.relative_to(checkout_path).as_posix()
+        if path.name == "pom.xml":
+            yield location, _parse_pom_dependencies(path)
+        elif path.name == "package.json":
+            yield location, _parse_package_json(path)
+
+
+def _parse_pom_dependencies(path: Path) -> list[_DeclaredDep]:
+    """Dependencies declared in a pom.xml (anywhere a `<dependency>` appears).
+
+    POMs carry the Maven namespace, so elements are matched on their local tag
+    name.
+    """
+    try:
+        root = ElementTree.parse(path).getroot()
+    except ElementTree.ParseError:
+        return []
+    deps = []
+    for element in root.iter():
+        if _local_name(element.tag) != "dependency":
+            continue
+        group = artifact = version = ""
+        for child in element:
+            local = _local_name(child.tag)
+            text = (child.text or "").strip()
+            if local == "groupId":
+                group = text
+            elif local == "artifactId":
+                artifact = text
+            elif local == "version":
+                version = text
+        if not artifact:
+            continue
+        coordinate = f"{group}:{artifact}" if group else artifact
+        deps.append(_DeclaredDep(coordinate=coordinate, version=version))
+    return deps
+
+
+# The npm manifest sections that declare dependencies, in a stable order.
+_NPM_DEPENDENCY_BLOCKS = (
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+)
+
+
+def _parse_package_json(path: Path) -> list[_DeclaredDep]:
+    """Dependencies declared across a package.json's dependency sections."""
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    deps = []
+    for block in _NPM_DEPENDENCY_BLOCKS:
+        section = data.get(block)
+        if not isinstance(section, dict):
+            continue
+        for name, version in section.items():
+            if not isinstance(version, str):
+                continue
+            deps.append(_DeclaredDep(coordinate=name, version=version.strip()))
+    return deps
+
+
+def _local_name(tag: str) -> str:
+    """The local name of a possibly namespaced XML tag (`{ns}foo` -> `foo`)."""
+    return tag.rpartition("}")[2]
 
 
 # A Spring web layer: a class annotated @Controller or @RestController. Such a

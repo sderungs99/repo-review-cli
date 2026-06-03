@@ -13,10 +13,16 @@ from repo_review.checks import (
     check_god_class,
     check_large_files,
     check_layering_violation,
+    check_assertion_free_tests,
+    check_disabled_tests,
+    check_large_files,
+    check_react_dangerous_html,
     check_readme_presence,
     check_secrets,
+    check_snapshot_prerelease_deps,
     check_sonar_exclusions,
     check_suppression_density,
+    check_sql_string_concat,
     check_tests_present,
     check_todo_markers,
 )
@@ -38,4 +44,9 @@ def run_review(manifest_path: Path, workdir: Path) -> list[Finding]:
         findings.extend(check_layering_violation(entry.name, checkout))
         findings.extend(check_god_class(entry.name, checkout))
         findings.extend(check_suppression_density(entry.name, checkout))
+        findings.extend(check_snapshot_prerelease_deps(entry.name, checkout))
+        findings.extend(check_react_dangerous_html(entry.name, checkout))
+        findings.extend(check_sql_string_concat(entry.name, checkout))
+        findings.extend(check_disabled_tests(entry.name, checkout))
+        findings.extend(check_assertion_free_tests(entry.name, checkout))
     return findings

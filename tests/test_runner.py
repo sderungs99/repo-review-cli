@@ -7,8 +7,10 @@ SUBSTANTIAL = (
 )
 
 # A minimal test-tree signal, so the tests-present check stays silent and these
-# tests stay focused on the single check each is exercising.
-HAS_TESTS = {"App.test.js": "it('renders', () => {});\n"}
+# tests stay focused on the single check each is exercising. It carries an
+# assertion (and no disabled directive) so it also stays silent for the
+# disabled-tests and assertion-free-tests checks.
+HAS_TESTS = {"App.test.js": "it('renders', () => { expect(true).toBe(true); });\n"}
 
 
 def test_runs_readme_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
@@ -126,6 +128,99 @@ def test_runs_secret_scanning_check_across_every_subject_repo(make_git_repo, wri
     assert findings[0].check_id == "secret-scanning"
     assert findings[0].category == "security"
     assert '"security"' in to_json(findings)
+
+
+def test_runs_disabled_tests_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    path, sha = make_git_repo(
+        "web-frontend",
+        SUBSTANTIAL,
+        extra_files={"flaky.test.ts": "xit('skipped', () => {});\n", **HAS_TESTS},
+    )
+    manifest = write_manifest([("web-frontend", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # README is substantial and the suite is present (HAS_TESTS asserts), so the
+    # only finding is the disabled test.
+    assert len(findings) == 1
+    assert findings[0].check_id == "disabled-tests"
+    assert findings[0].category == "testing"
+
+
+def test_runs_assertion_free_tests_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    weak = "it('renders the cart', () => { render(<Cart />); });\n"
+    path, sha = make_git_repo(
+        "web-frontend", SUBSTANTIAL, extra_files={"weak.test.tsx": weak, **HAS_TESTS}
+    )
+    manifest = write_manifest([("web-frontend", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # The weak test defines a case but asserts nothing; HAS_TESTS asserts, so the
+    # only finding is the assertion-free file.
+    assert len(findings) == 1
+    assert findings[0].check_id == "assertion-free-tests"
+    assert findings[0].category == "testing"
+
+def test_runs_react_dangerous_html_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    path, sha = make_git_repo(
+        "web-frontend",
+        SUBSTANTIAL,
+        extra_files={
+            "Article.jsx": "const a = <div dangerouslySetInnerHTML={{ __html: h }} />;\n",
+            **HAS_TESTS,
+        },
+    )
+    manifest = write_manifest([("web-frontend", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # README is substantial and tests are present, so the only finding is the
+    # dangerouslySetInnerHTML usage.
+    assert len(findings) == 1
+    assert findings[0].check_id == "react-dangerous-html"
+    assert findings[0].category == "security"
+
+
+def test_runs_sql_string_concat_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    path, sha = make_git_repo(
+        "payments-service",
+        SUBSTANTIAL,
+        extra_files={
+            "UserDao.java": '    String sql = "SELECT * FROM users WHERE id = " + id;\n',
+            **HAS_TESTS,
+        },
+    )
+    manifest = write_manifest([("payments-service", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # README is substantial and tests are present, so the only finding is the
+    # concatenated SQL query.
+    assert len(findings) == 1
+    assert findings[0].check_id == "sql-string-concat"
+    assert findings[0].category == "security"
+
+
+def test_runs_snapshot_prerelease_deps_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    pom = (
+        '<project xmlns="http://maven.apache.org/POM/4.0.0">\n'
+        "  <dependencies>\n    <dependency>\n"
+        "      <groupId>com.acme</groupId>\n"
+        "      <artifactId>billing</artifactId>\n"
+        "      <version>1.4.0-SNAPSHOT</version>\n"
+        "    </dependency>\n  </dependencies>\n</project>\n"
+    )
+    path, sha = make_git_repo(
+        "payments-service", SUBSTANTIAL, extra_files={"pom.xml": pom, **HAS_TESTS}
+    )
+    manifest = write_manifest([("payments-service", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "snapshot-prerelease-deps"
+    assert findings[0].category == "dependencies"
 
 
 def test_runs_layering_violation_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
