@@ -130,6 +130,38 @@ def test_runs_secret_scanning_check_across_every_subject_repo(make_git_repo, wri
     assert '"security"' in to_json(findings)
 
 
+def test_runs_disabled_tests_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    path, sha = make_git_repo(
+        "web-frontend",
+        SUBSTANTIAL,
+        extra_files={"flaky.test.ts": "xit('skipped', () => {});\n", **HAS_TESTS},
+    )
+    manifest = write_manifest([("web-frontend", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # README is substantial and the suite is present (HAS_TESTS asserts), so the
+    # only finding is the disabled test.
+    assert len(findings) == 1
+    assert findings[0].check_id == "disabled-tests"
+    assert findings[0].category == "testing"
+
+
+def test_runs_assertion_free_tests_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    weak = "it('renders the cart', () => { render(<Cart />); });\n"
+    path, sha = make_git_repo(
+        "web-frontend", SUBSTANTIAL, extra_files={"weak.test.tsx": weak, **HAS_TESTS}
+    )
+    manifest = write_manifest([("web-frontend", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # The weak test defines a case but asserts nothing; HAS_TESTS asserts, so the
+    # only finding is the assertion-free file.
+    assert len(findings) == 1
+    assert findings[0].check_id == "assertion-free-tests"
+    assert findings[0].category == "testing"
+
 def test_runs_react_dangerous_html_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
     path, sha = make_git_repo(
         "web-frontend",
