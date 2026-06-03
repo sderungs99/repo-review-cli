@@ -500,6 +500,12 @@ _SQL_STATEMENT_LITERAL = re.compile(
 # (`"... WHERE id = ?"` with no concatenation) carries no `+` and is not flagged.
 _STRING_CONCAT = re.compile(r'"\s*\+|\+\s*"')
 
+# A query-defining JPA/Hibernate annotation. Concatenation inside its argument is
+# never an injection risk: a Java annotation argument must be a constant
+# expression, so the `+` can only join compile-time constants — runtime input
+# cannot reach the string, and real inputs bind through :named/?n parameters.
+_QUERY_ANNOTATION = re.compile(r"@(?:Query|NamedQuery|NamedNativeQuery)\b")
+
 
 def check_sql_string_concat(repo_name: str, checkout_path: Path) -> list[Finding]:
     """Flag SQL queries assembled by string concatenation (injection risk)."""
@@ -507,6 +513,8 @@ def check_sql_string_concat(repo_name: str, checkout_path: Path) -> list[Finding
     for source in _iter_source_files(checkout_path):
         relative = source.relative_to(checkout_path).as_posix()
         for lineno, line in enumerate(source.read_text(errors="replace").splitlines(), 1):
+            if _QUERY_ANNOTATION.search(line):
+                continue
             if _SQL_STATEMENT_LITERAL.search(line) and _STRING_CONCAT.search(line):
                 findings.append(Finding(
                     repo=repo_name,

@@ -30,6 +30,30 @@ def test_parameterised_query_is_not_flagged(tmp_path):
     assert check_sql_string_concat("payments-service", tmp_path) == []
 
 
+def test_concatenation_inside_a_query_annotation_is_not_flagged(tmp_path):
+    # A Java annotation argument must be a constant expression, so the `+` only
+    # joins compile-time constants — no runtime input can reach it, no injection.
+    (tmp_path / "UserRepository.java").write_text(
+        "interface UserRepository extends JpaRepository<User, Long> {\n"
+        '    @Query("SELECT u FROM User u WHERE u.status = " + STATUS_ACTIVE)\n'
+        "    List<User> findActive();\n"
+        "}\n"
+    )
+
+    assert check_sql_string_concat("payments-service", tmp_path) == []
+
+
+def test_named_native_query_annotation_concatenation_is_not_flagged(tmp_path):
+    # Single-line form: the annotation and the concatenation share the line, so
+    # the guard recognises the annotation context.
+    (tmp_path / "User.java").write_text(
+        '@NamedNativeQuery(name = "User.find", query = "SELECT * FROM users WHERE tenant = " + TENANT)\n'
+        "class User {}\n"
+    )
+
+    assert check_sql_string_concat("payments-service", tmp_path) == []
+
+
 def test_static_query_literal_without_concat_is_not_flagged(tmp_path):
     (tmp_path / "UserDao.java").write_text(
         '    String sql = "SELECT id, name FROM users";\n'
