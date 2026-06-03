@@ -29,6 +29,12 @@ SQL_STRING_CONCAT_CHECK_ID = "sql-string-concat"
 
 SECRETS_CHECK_ID = "secret-scanning"
 
+LAYERING_VIOLATION_CHECK_ID = "layering-violation"
+
+GOD_CLASS_CHECK_ID = "god-class"
+
+SUPPRESSION_DENSITY_CHECK_ID = "suppression-density"
+
 SNAPSHOT_PRERELEASE_DEPS_CHECK_ID = "snapshot-prerelease-deps"
 
 DISABLED_TESTS_CHECK_ID = "disabled-tests"
@@ -710,3 +716,128 @@ def _parse_package_json(path: Path) -> list[_DeclaredDep]:
 def _local_name(tag: str) -> str:
     """The local name of a possibly namespaced XML tag (`{ns}foo` -> `foo`)."""
     return tag.rpartition("}")[2]
+
+
+# A Spring web layer: a class annotated @Controller or @RestController. Such a
+# class is meant to delegate to a service, not reach into persistence itself.
+_CONTROLLER_ANNOTATION = re.compile(r"@(?:Rest)?Controller\b")
+
+# A dependency on a repository type, recognised by Spring's `*Repository` naming
+# convention used as the type of a field or constructor parameter
+# (`OrderRepository orders`). The capture is the repository type name.
+_REPOSITORY_DEPENDENCY = re.compile(r"\b([A-Z]\w*Repository)\s+[a-z_]\w*")
+
+
+def check_layering_violation(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Flag Spring controllers that depend directly on a repository (skip the service layer)."""
+    findings = []
+    for source in _iter_java_files(checkout_path):
+        text = source.read_text(errors="replace")
+        if not _CONTROLLER_ANNOTATION.search(text):
+            continue
+        repositories = sorted({m.group(1) for m in _REPOSITORY_DEPENDENCY.finditer(text)})
+        if not repositories:
+            continue
+        relative = source.relative_to(checkout_path).as_posix()
+        findings.append(Finding(
+            repo=repo_name,
+            check_id=LAYERING_VIOLATION_CHECK_ID,
+            category="architecture",
+            severity=MEDIUM,
+            evidence=(
+                f"Controller {relative} depends directly on repository type(s) "
+                f"{', '.join(repositories)}, bypassing the service layer."
+            ),
+            location=relative,
+        ))
+    return findings
+
+
+# An injected collaborator: a field annotated @Autowired (field injection) or a
+# `private/protected final ReferenceType name;` field (constructor injection). A
+# high count of these is the over-injection signal of a god class. Primitive-typed
+# final fields (constants) start lower-case after `final` and are not matched.
+_INJECTED_DEPENDENCY = re.compile(
+    r"@Autowired\b"
+    r"|\b(?:private|protected)\s+final\s+[A-Z]\w*(?:<[^>]*>)?\s+\w+\s*;"
+)
+
+# At or above this many injected dependencies, a class is carrying too many
+# collaborators (high fan-in) to hold a single responsibility. Hardcoded
+# editorial threshold per ADR-0004.
+GOD_CLASS_DEPENDENCY_THRESHOLD = 10
+
+
+def check_god_class(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Flag classes with an excessive number of injected dependencies (high fan-in)."""
+    findings = []
+    for source in _iter_java_files(checkout_path):
+        text = source.read_text(errors="replace")
+        count = len(_INJECTED_DEPENDENCY.findall(text))
+        if count < GOD_CLASS_DEPENDENCY_THRESHOLD:
+            continue
+        relative = source.relative_to(checkout_path).as_posix()
+        findings.append(Finding(
+            repo=repo_name,
+            check_id=GOD_CLASS_CHECK_ID,
+            category="architecture",
+            severity=MEDIUM,
+            evidence=(
+                f"{relative} injects {count} dependencies (threshold "
+                f"{GOD_CLASS_DEPENDENCY_THRESHOLD}); high fan-in suggests a god "
+                f"class with too many responsibilities."
+            ),
+            location=relative,
+        ))
+    return findings
+
+
+# A suppression directive that silences a static-analysis or compiler warning:
+# ESLint disables, TypeScript ignore/expect-error/nocheck pragmas, and Java's
+# @SuppressWarnings. Each is a deliberately hidden warning to account for.
+_SUPPRESSION_DIRECTIVE = re.compile(
+    r"eslint-disable\b|@ts-(?:ignore|expect-error|nocheck)\b|@SuppressWarnings\b"
+)
+
+# At or above this many suppressions, silencing warnings is a pervasive habit
+# rather than the odd justified exception, so the finding escalates to Medium.
+SUPPRESSION_DENSE_THRESHOLD = 25
+
+# How many file:line locations to quote as a representative sample.
+SUPPRESSION_SAMPLE_LIMIT = 5
+
+
+def check_suppression_density(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Count warning-suppression directives across a Subject Repo's source files."""
+    locations = []
+    for source in _iter_source_files(checkout_path):
+        relative = source.relative_to(checkout_path).as_posix()
+        for lineno, line in enumerate(source.read_text(errors="replace").splitlines(), 1):
+            if _SUPPRESSION_DIRECTIVE.search(line):
+                locations.append(f"{relative}:{lineno}")
+
+    count = len(locations)
+    if count == 0:
+        return []
+
+    sample = ", ".join(locations[:SUPPRESSION_SAMPLE_LIMIT])
+    severity = MEDIUM if count >= SUPPRESSION_DENSE_THRESHOLD else LOW
+    return [Finding(
+        repo=repo_name,
+        check_id=SUPPRESSION_DENSITY_CHECK_ID,
+        category="code-hygiene",
+        severity=severity,
+        evidence=(
+            f"Found {count} warning-suppression directive(s) (eslint-disable / "
+            f"@ts-ignore / @SuppressWarnings) across source files. "
+            f"Sample locations: {sample}."
+        ),
+        location=".",
+    )]
+
+
+def _iter_java_files(checkout_path: Path):
+    """Java source files under the checkout, in stable order, vendored dirs pruned."""
+    for source in _iter_source_files(checkout_path):
+        if source.suffix == ".java":
+            yield source
