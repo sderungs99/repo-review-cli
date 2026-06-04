@@ -15,6 +15,10 @@ from repo_review.manifest import ManifestEntry
 def acquire_repo(entry: ManifestEntry, workdir: Path) -> Path:
     """Clone ``entry`` into ``workdir`` and check out its pinned SHA.
 
+    When ``entry.sha`` is ``None`` the clone is left on the default branch at
+    its latest commit, so the review tracks the live repository instead of a
+    reproducible snapshot (ADR-0001).
+
     Returns the path to the local checkout. A leading ``~`` in the Manifest
     source is expanded here — git does not expand it, and the shell never sees
     it because the source comes from the Manifest JSON, not the command line.
@@ -25,7 +29,8 @@ def acquire_repo(entry: ManifestEntry, workdir: Path) -> Path:
     source = os.path.expanduser(entry.source)
 
     _git(entry, ["clone", "--quiet", source, str(checkout)])
-    _git(entry, ["checkout", "--quiet", entry.sha], cwd=checkout)
+    if entry.sha is not None:
+        _git(entry, ["checkout", "--quiet", entry.sha], cwd=checkout)
     return checkout
 
 

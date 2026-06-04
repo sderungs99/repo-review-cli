@@ -7,8 +7,7 @@
     },
     {
       "name": "auth-service",
-      "source": "https://example.com/vendor/auth-service.git",
-      "sha": "1111111111111111111111111111111111111111"
+      "source": "https://example.com/vendor/auth-service.git"
     }
   ]
 }

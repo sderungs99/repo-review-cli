@@ -14,13 +14,18 @@ from pathlib import Path
 class ManifestEntry:
     name: str
     source: str
-    sha: str
+    sha: str | None = None
 
 
 def load_manifest(path: Path) -> list[ManifestEntry]:
-    """Load every Subject Repo entry from the Manifest file."""
+    """Load every Subject Repo entry from the Manifest file.
+
+    ``sha`` is optional: an entry without one is reviewed at the latest commit
+    on the repository's default branch, trading reproducibility (ADR-0001) for
+    convenience.
+    """
     data = json.loads(Path(path).read_text())
     return [
-        ManifestEntry(name=r["name"], source=r["source"], sha=r["sha"])
+        ManifestEntry(name=r["name"], source=r["source"], sha=r.get("sha"))
         for r in data["repos"]
     ]

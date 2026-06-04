@@ -21,3 +21,14 @@ def test_loads_every_subject_repo_pinned_to_its_sha(tmp_path):
     assert [e.name for e in entries] == ["auth-service", "payments-service"]
     assert entries[0].source == "/srv/auth"
     assert entries[0].sha == "a" * 40
+
+
+def test_an_omitted_sha_loads_as_none(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({"repos": [{"name": "auth-service", "source": "/srv/auth"}]})
+    )
+
+    entries = load_manifest(manifest)
+
+    assert entries[0].sha is None
