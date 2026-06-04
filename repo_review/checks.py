@@ -494,20 +494,41 @@ _SQL_STATEMENT_LITERAL = re.compile(
     re.IGNORECASE,
 )
 
-# String concatenation: a `+` directly adjacent to a string literal's quote.
-# Paired with a SQL-statement literal on the same line, this is the classic
-# injection-prone `"... WHERE id = " + var` construction. A parameterised query
-# (`"... WHERE id = ?"` with no concatenation) carries no `+` and is not flagged.
-_STRING_CONCAT = re.compile(r'"\s*\+|\+\s*"')
+# A SQL literal concatenated with a non-literal operand: a variable, method call,
+# or parenthesised expression (`"...sql..." + id`, `table + "...sql..."`). This is
+# the injection-prone construction. Concatenation of string literals only
+# (`"..." + "..."`, a split constant) cannot carry runtime input, so it does not
+# match; a parameterised query (`"... = ?"`) carries no `+` and does not match.
+_CONCAT_WITH_VARIABLE = re.compile(r'"\s*\+\s*[^"\s]|[^"\s]\s*\+\s*"')
+
+# A query-defining JPA/Hibernate annotation. Concatenation inside its argument is
+# never an injection risk: a Java annotation argument must be a constant
+# expression, so the `+` can only join compile-time constants — runtime input
+# cannot reach the string, and real inputs bind through :named/?n parameters.
+_QUERY_ANNOTATION = re.compile(r"@(?:Query|NamedQuery|NamedNativeQuery)\b")
+
+# A line that prints or reports SQL rather than executes it: a logger call, a
+# System.out/err write, or a thrown exception's message. A query string built in
+# one of these is not handed to the database, so it is not an injection sink.
+_LOG_OR_THROW = re.compile(
+    r"\b(?:log|logger|logging)\s*\.|\bSystem\.(?:out|err)\b|\bthrow\b",
+    re.IGNORECASE,
+)
 
 
 def check_sql_string_concat(repo_name: str, checkout_path: Path) -> list[Finding]:
     """Flag SQL queries assembled by string concatenation (injection risk)."""
     findings = []
     for source in _iter_source_files(checkout_path):
+        # Test code builds expected-query strings, not runtime sinks (selected
+        # FP filter — see DEVELOPER_NOTES.md).
+        if _is_test_signal(source.relative_to(checkout_path).parts):
+            continue
         relative = source.relative_to(checkout_path).as_posix()
         for lineno, line in enumerate(source.read_text(errors="replace").splitlines(), 1):
-            if _SQL_STATEMENT_LITERAL.search(line) and _STRING_CONCAT.search(line):
+            if _QUERY_ANNOTATION.search(line) or _LOG_OR_THROW.search(line):
+                continue
+            if _SQL_STATEMENT_LITERAL.search(line) and _CONCAT_WITH_VARIABLE.search(line):
                 findings.append(Finding(
                     repo=repo_name,
                     check_id=SQL_STRING_CONCAT_CHECK_ID,

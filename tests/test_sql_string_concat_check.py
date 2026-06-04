@@ -30,6 +30,30 @@ def test_parameterised_query_is_not_flagged(tmp_path):
     assert check_sql_string_concat("payments-service", tmp_path) == []
 
 
+def test_concatenation_inside_a_query_annotation_is_not_flagged(tmp_path):
+    # A Java annotation argument must be a constant expression, so the `+` only
+    # joins compile-time constants — no runtime input can reach it, no injection.
+    (tmp_path / "UserRepository.java").write_text(
+        "interface UserRepository extends JpaRepository<User, Long> {\n"
+        '    @Query("SELECT u FROM User u WHERE u.status = " + STATUS_ACTIVE)\n'
+        "    List<User> findActive();\n"
+        "}\n"
+    )
+
+    assert check_sql_string_concat("payments-service", tmp_path) == []
+
+
+def test_named_native_query_annotation_concatenation_is_not_flagged(tmp_path):
+    # Single-line form: the annotation and the concatenation share the line, so
+    # the guard recognises the annotation context.
+    (tmp_path / "User.java").write_text(
+        '@NamedNativeQuery(name = "User.find", query = "SELECT * FROM users WHERE tenant = " + TENANT)\n'
+        "class User {}\n"
+    )
+
+    assert check_sql_string_concat("payments-service", tmp_path) == []
+
+
 def test_static_query_literal_without_concat_is_not_flagged(tmp_path):
     (tmp_path / "UserDao.java").write_text(
         '    String sql = "SELECT id, name FROM users";\n'
@@ -67,6 +91,49 @@ def test_each_concatenated_dml_verb_is_detected(tmp_path):
 
     assert len(findings) == 3
     assert all(f.severity == "High" for f in findings)
+
+
+def test_literal_only_concatenation_is_not_flagged(tmp_path):
+    # A split constant string: every operand is a literal, so no runtime input
+    # can enter — not an injection risk.
+    (tmp_path / "Dao.java").write_text(
+        '    String sql = "SELECT * FROM t " + "WHERE id = ?";\n'
+    )
+
+    assert check_sql_string_concat("payments-service", tmp_path) == []
+
+
+def test_concatenation_with_a_constant_identifier_is_still_flagged(tmp_path):
+    # A CONSTANT-style operand is an identifier, not a literal, so it stays
+    # flagged: the check reports the shape, leaving exploitability to a human.
+    (tmp_path / "Dao.java").write_text(
+        '    String sql = "SELECT * FROM " + TABLE_NAME + " WHERE 1=1";\n'
+    )
+
+    findings = check_sql_string_concat("payments-service", tmp_path)
+
+    assert len(findings) == 1
+
+
+def test_logging_and_exception_lines_are_not_flagged(tmp_path):
+    (tmp_path / "Dao.java").write_text(
+        '    log.debug("Running SELECT * FROM t " + sql);\n'
+        '    logger.info("DELETE FROM t for " + id);\n'
+        '    System.out.println("UPDATE t SET x = " + x);\n'
+        '    throw new SqlException("INSERT INTO t failed: " + id);\n'
+    )
+
+    assert check_sql_string_concat("payments-service", tmp_path) == []
+
+
+def test_concatenated_query_in_a_test_tree_is_not_flagged(tmp_path):
+    test_dir = tmp_path / "src" / "test" / "java"
+    test_dir.mkdir(parents=True)
+    (test_dir / "UserDaoTest.java").write_text(
+        '    String expected = "SELECT * FROM users WHERE id = " + id;\n'
+    )
+
+    assert check_sql_string_concat("payments-service", tmp_path) == []
 
 
 def test_ignores_vendored_dirs(tmp_path):
