@@ -54,3 +54,26 @@ _Avoid_: the report (ambiguous), JSON output
 **Stakeholder Report**:
 The non-technical rolled-up narrative, derived strictly from the same findings set as the Technical Findings Report — never produced independently.
 _Avoid_: exec summary, the report (ambiguous)
+
+**Source Root**:
+The first directory under the source tree (`src/main/java` for Java projects, `src` for JavaScript/TypeScript projects) that contains source files. Serves as the origin point for measuring package nesting depth.
+_Avoid_: package root (ambiguous with Maven groupId-based convention)
+
+**Actual Root**:
+The first meaningful directory **under** the Source Root, determined by a two-pass BFS walk:
+
+1. **Branching root** — first directory with more than one subdirectory (the real package root, e.g. ``entitlement`` branches into ``model`` and ``entity``). Organisational prefix trees (``jp/co/smbc/gcms/channel``) are skipped.
+2. **Flat fallback** — first directory that has source files anywhere underneath (for flat projects without a package hierarchy, e.g. React apps with ``src/index.tsx`` directly under ``src``).
+
+Nesting depth is measured from the Actual Root, not from the Source Root.
+_Avoid_: root package
+
+**Feature Package**:
+A directory in the source tree organized around a single feature or bounded context, containing roughly 10 or fewer source files (e.g., one controller, a service interface and impl, DTOs). The target structure under the "package-by-feature" convention. Contrast with Layer Package (a single directory containing files from multiple features organized by technical layer).
+
+**Layer Package**:
+A single directory containing source files from multiple features organized by technical layer (e.g., a `controller/` directory with controllers from ten different features, a `service/` directory with service classes from ten different features). The most common structural anti-pattern; the primary target of the directory-size check.
+
+**Excessive Nesting**:
+Package or directory structure that is deeper than 4 levels from the Actual Root. A structural smell indicating either over-granular packaging or poorly chosen feature boundaries that force files into deep hierarchies to avoid crowded directories.
+_Avoid_: deep packages (vague)

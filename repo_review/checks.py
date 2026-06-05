@@ -862,3 +862,197 @@ def _iter_java_files(checkout_path: Path):
     for source in _iter_source_files(checkout_path):
         if source.suffix == ".java":
             yield source
+
+# ── Project detection ───────────────────────────────────────────────────────
+
+# Manifest files that identify a Subject Repo as Java or JavaScript/TypeScript.
+_PROJECT_KIND_FILES = ("pom.xml", "build.gradle", "package.json")
+
+
+def is_project(path: Path) -> bool:
+    """Does the checkout contain a Java or JS/TS project manifest?"""
+    return any((path / f).is_file() for f in _PROJECT_KIND_FILES)
+
+
+# ── Directory file density check ────────────────────────────────────────────
+
+DIRECTORY_FILE_DENSITY_CHECK_ID = "directory-file-density"
+
+# Directories with more source files than this are flagged as a density concern.
+DIRECTORY_FILE_DENSITY_THRESHOLD = 10
+
+# Source-root directories to scan, depending on project kind.
+_JAVA_SOURCE_ROOT = "src/main/java"
+_JAVASCRIPT_SOURCE_ROOT = "src"
+
+
+def check_directory_file_density(
+    repo_name: str, checkout_path: Path
+) -> list[Finding]:
+    """Flag directories that contain more source files than the threshold."""
+    if not is_project(checkout_path):
+        return []
+
+    findings: list[Finding] = []
+    source_roots = _source_roots_for(checkout_path)
+
+    for root_dir in source_roots:
+        if not root_dir.is_dir():
+            continue
+        for dir_path in _iter_all_directories(root_dir):
+            count = sum(
+                1
+                for f in dir_path.iterdir()
+                if f.is_file() and f.suffix in _SOURCE_SUFFIXES
+            )
+            if count > DIRECTORY_FILE_DENSITY_THRESHOLD:
+                relative = dir_path.relative_to(checkout_path).as_posix()
+                findings.append(Finding(
+                    repo=repo_name,
+                    check_id=DIRECTORY_FILE_DENSITY_CHECK_ID,
+                    category="code-hygiene",
+                    severity=MEDIUM,
+                    evidence=(
+                        f"{relative} ({count} files, limit "
+                        f"{DIRECTORY_FILE_DENSITY_THRESHOLD})."
+                    ),
+                    location=".",
+                ))
+
+    return findings
+
+
+def _source_roots_for(checkout_path: Path) -> list[Path]:
+    """Return the source-root directories to scan.
+
+    Java projects scan **all** ``src/main/java`` and ``src/test/java``
+    directories under the checkout (to handle multi-module Maven/Gradle
+    projects).  JS/TS projects scan all ``src`` directories (to handle
+    monorepos).
+    """
+    if (checkout_path / "pom.xml").is_file() or \
+       (checkout_path / "build.gradle").is_file():
+        roots: set[Path] = set()
+        roots.update(checkout_path.rglob("src/main/java"))
+        roots.update(checkout_path.rglob("src/test/java"))
+        return sorted(roots, key=lambda p: len(p.parts))
+    if (checkout_path / "package.json").is_file():
+        return sorted(
+            checkout_path.rglob(_JAVASCRIPT_SOURCE_ROOT),
+            key=lambda p: len(p.parts),
+        )
+    return []
+
+
+def _iter_all_directories(start: Path):
+    """Yield every directory under ``start`` in depth-first order, pruning vendor dirs."""
+    yield start
+    for child in sorted(start.iterdir()):
+        if child.is_dir() and child.name not in _SKIP_DIRS:
+            yield from _iter_all_directories(child)
+
+
+# ── Excessive package nesting check ─────────────────────────────────────────
+
+EXCESSIVE_PACKAGE_NESTING_CHECK_ID = "excessive-package-nesting"
+
+# Package nesting deeper than this from the Actual Root is flagged.
+EXCESSIVE_PACKAGE_NESTING_THRESHOLD = 4
+
+
+def check_excessive_package_nesting(
+    repo_name: str, checkout_path: Path
+) -> list[Finding]:
+    """Flag if source files exceed the nesting depth threshold from the Actual Root."""
+    if not is_project(checkout_path):
+        return []
+
+    source_roots = _source_roots_for(checkout_path)
+    if not source_roots:
+        return []
+
+    max_depth = -1
+    deepest_path: Path | None = None
+
+    # Measure depth from the actual root of each source root (important for
+    # monorepos). The actual root is the shallowest non-empty directory.
+    for root in source_roots:
+        actual_root = _find_actual_root(root)
+        if actual_root is None:
+            continue
+        for source in _iter_source_files(actual_root):
+            depth = len(source.relative_to(actual_root).parts)
+            if depth > max_depth:
+                max_depth = depth
+                deepest_path = source
+
+    if max_depth > EXCESSIVE_PACKAGE_NESTING_THRESHOLD and deepest_path is not None:
+        relative = deepest_path.relative_to(checkout_path).as_posix()
+        return [Finding(
+            repo=repo_name,
+            check_id=EXCESSIVE_PACKAGE_NESTING_CHECK_ID,
+            category="code-hygiene",
+            severity=MEDIUM,
+            evidence=(
+                f"deepest {max_depth} levels at {relative} "
+                f"(threshold {EXCESSIVE_PACKAGE_NESTING_THRESHOLD})."
+            ),
+            location=".",
+        )]
+
+    return []
+
+
+def _find_actual_root(start: Path) -> Path | None:
+    """The first meaningful directory *under* ``start``.
+
+    Searches in two passes (top-down, BFS):
+
+    1. **Branching root** — first directory with more than one subdirectory
+       (the real package root, e.g. ``entitlement`` has ``model`` + ``entity``).
+    2. **Flat fallback** — first directory with source files (for flat projects
+       that have no package hierarchy).
+
+    Returns the first branching root found, or the flat fallback, or ``None``.
+    """
+    if not start.is_dir():
+        return None
+
+    def _has_source_files(dir_path: Path) -> bool:
+        return any(
+            f.is_file() and f.suffix in _SOURCE_SUFFIXES
+            for f in _iter_source_files(dir_path)
+        )
+
+    def _bfs_find(visit_fn) -> Path | None:
+        """BFS, returning the first directory that satisfies ``visit_fn``."""
+        queue = sorted(
+            (c for c in start.iterdir() if c.is_dir() and c.name not in _SKIP_DIRS),
+            key=lambda p: p.name,
+        )
+        visited: set[Path] = set(queue)
+
+        while queue:
+            next_queue: list[Path] = []
+            for candidate in queue:
+                if visit_fn(candidate):
+                    return candidate
+                for child in sorted(candidate.iterdir(), key=lambda p: p.name):
+                    if child.is_dir() and child.name not in _SKIP_DIRS and child not in visited:
+                        visited.add(child)
+                        next_queue.append(child)
+            queue = next_queue
+        return None
+
+    # Pass 1: find the first branching directory (>1 subdirectory).
+    branching = _bfs_find(
+        lambda c: len([
+            ch for ch in c.iterdir()
+            if ch.is_dir() and ch.name not in _SKIP_DIRS
+        ]) > 1
+    )
+    if branching is not None:
+        return branching
+
+    # Pass 2: flat fallback — first directory with source files.
+    return _bfs_find(_has_source_files)
