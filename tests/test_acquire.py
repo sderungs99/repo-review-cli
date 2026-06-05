@@ -39,6 +39,19 @@ def test_acquire_checks_out_exactly_the_pinned_sha(tmp_path):
     assert "v1 of the readme" in (checkout / "README.md").read_text()
 
 
+def test_acquire_without_a_sha_uses_the_latest_commit(tmp_path):
+    source = tmp_path / "source"
+    _make_source_repo(source)
+    latest_sha = _git(source, "rev-parse", "HEAD")
+    entry = ManifestEntry(name="auth-service", source=str(source))
+
+    checkout = acquire_repo(entry, tmp_path / "work")
+
+    assert _git(checkout, "rev-parse", "HEAD") == latest_sha
+    # The working tree reflects the latest commit, not the first one.
+    assert "v2 changed later" in (checkout / "README.md").read_text()
+
+
 def test_acquire_expands_a_tilde_in_the_source_path(tmp_path, monkeypatch):
     # A manifest may store sources as ~/... ; git can't expand ~, the tool must.
     monkeypatch.setenv("HOME", str(tmp_path))

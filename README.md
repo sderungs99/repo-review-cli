@@ -57,15 +57,16 @@ Defaults: `--manifest ./manifest.json`, `--out ./reports/`. Writes:
 
 ### Manifest format
 
-A JSON object with a `repos` array; each entry is a Subject Repo pinned to a SHA.
-`source` may be any git URL or a local path. See
-[`manifest.example.json`](manifest.example.json):
+A JSON object with a `repos` array; each entry is a Subject Repo. `source` may be
+any git URL or a local path. `sha` is optional: pin it to an exact commit for a
+reproducible review (ADR-0001), or omit it to review the latest commit on the
+default branch. See [`manifest.example.json`](manifest.example.json):
 
 ```json
 {
   "repos": [
     { "name": "payments-service", "source": "/abs/path/or/git-url", "sha": "<40-char commit SHA>" },
-    { "name": "auth-service", "source": "/abs/path/or/git-url", "sha": "<40-char commit SHA>" }
+    { "name": "auth-service", "source": "/abs/path/or/git-url" }
   ]
 }
 ```
