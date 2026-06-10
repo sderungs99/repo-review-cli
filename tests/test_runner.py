@@ -273,3 +273,21 @@ def test_runs_suppression_density_check_across_every_subject_repo(make_git_repo,
     assert len(findings) == 1
     assert findings[0].check_id == "suppression-density"
     assert findings[0].category == "code-hygiene"
+
+
+def test_runs_unused_dependency_check_across_every_subject_repo(make_git_repo, write_manifest, tmp_path):
+    package_json = '{\n  "dependencies": {\n    "left-pad": "^1.3.0"\n  }\n}\n'
+    path, sha = make_git_repo(
+        "web-frontend",
+        SUBSTANTIAL,
+        extra_files={"package.json": package_json, "index.js": "const x = 1;\n", **HAS_TESTS},
+    )
+    manifest = write_manifest([("web-frontend", path, sha)])
+
+    findings = run_review(manifest, tmp_path / "work1")
+
+    # README is substantial and tests are present, so the only finding is the
+    # declared-but-never-imported dependency.
+    assert len(findings) == 1
+    assert findings[0].check_id == "unused-dependency"
+    assert findings[0].category == "dependencies"
