@@ -26,6 +26,7 @@ from repo_review.checks import (
     check_todo_markers,
     check_directory_file_density,
     check_excessive_package_nesting,
+    check_unused_dependencies,
 )
 from repo_review.finding import Finding
 from repo_review.manifest import load_manifest
@@ -52,4 +53,5 @@ def run_review(manifest_path: Path, workdir: Path) -> list[Finding]:
         findings.extend(check_assertion_free_tests(entry.name, checkout))
         findings.extend(check_directory_file_density(entry.name, checkout))
         findings.extend(check_excessive_package_nesting(entry.name, checkout))
+        findings.extend(check_unused_dependencies(entry.name, checkout))
     return findings

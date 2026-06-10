@@ -1056,3 +1056,103 @@ def _find_actual_root(start: Path) -> Path | None:
 
     # Pass 2: flat fallback — first directory with source files.
     return _bfs_find(_has_source_files)
+
+
+# ── Unused dependency check (npm / React) ───────────────────────────────────
+
+UNUSED_DEPENDENCY_CHECK_ID = "unused-dependency"
+
+# A module specifier in an import/require/re-export: the quoted string after a
+# `from` clause (`import x from 'pkg'`, `export … from 'pkg'`), a side-effect
+# `import 'pkg'`, a dynamic `import('pkg')`, or a `require('pkg')`. Captures the
+# specifier itself, e.g. 'lodash', '@scope/pkg/sub', './local'. `\(?` covers the
+# parenthesised require/dynamic-import forms; the `from`/side-effect forms have none.
+_IMPORT_SPECIFIER = re.compile(
+    r"""\b(?:from|import|require)\b\s*\(?\s*['"]([^'"\n]+)['"]"""
+)
+
+
+def check_unused_dependencies(repo_name: str, checkout_path: Path) -> list[Finding]:
+    """Flag npm runtime dependencies that are never imported in the source.
+
+    Scope is the React/JS ecosystem only — an npm package name maps directly to
+    its import specifier, so "declared but never imported" is a high-confidence
+    signal. Only the runtime ``dependencies`` block is checked (devDependencies
+    are build/test tooling that is legitimately not imported), and ``@types/*``
+    packages are skipped because TypeScript consumes them without an import.
+
+    Maven is deliberately out of scope: a groupId/artifactId does not map to a
+    Java import package, so unused-dependency detection there needs bytecode
+    analysis, which the source-only model forbids (ADR-0007).
+    """
+    findings = []
+    for path in sorted(checkout_path.rglob("package.json")):
+        if _SKIP_DIRS.intersection(path.relative_to(checkout_path).parts):
+            continue
+        dependencies = _runtime_dependencies(path)
+        if not dependencies:
+            continue
+        imported = _imported_packages(path.parent)
+        location = path.relative_to(checkout_path).as_posix()
+        for name in dependencies:
+            if name.startswith("@types/") or name in imported:
+                continue
+            findings.append(Finding(
+                repo=repo_name,
+                check_id=UNUSED_DEPENDENCY_CHECK_ID,
+                category="dependencies",
+                severity=LOW,
+                evidence=(
+                    f"Dependency '{name}' is declared in {location} but never "
+                    f"imported in the source (no import/require found); it may be "
+                    f"redundant. Verify it is not pulled in via build config or "
+                    f"as a runtime polyfill."
+                ),
+                location=location,
+            ))
+    return findings
+
+
+def _runtime_dependencies(path: Path) -> list[str]:
+    """Package names in a package.json's runtime ``dependencies`` block, in order."""
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    section = data.get("dependencies")
+    if not isinstance(section, dict):
+        return []
+    return [name for name, version in section.items() if isinstance(version, str)]
+
+
+def _imported_packages(root: Path) -> set[str]:
+    """Every npm package imported anywhere in the source tree under ``root``.
+
+    Scanning the whole subtree (tests included) is deliberately lenient: an
+    import found anywhere clears the dependency, so the check only flags a
+    package with no import at all — it never reports a used one.
+    """
+    packages = set()
+    for source in _iter_source_files(root):
+        text = source.read_text(errors="replace")
+        for match in _IMPORT_SPECIFIER.finditer(text):
+            package = _imported_package(match.group(1))
+            if package is not None:
+                packages.add(package)
+    return packages
+
+
+def _imported_package(specifier: str) -> str | None:
+    """The package name a module specifier resolves to, or ``None`` if it is local.
+
+    `lodash/fp` -> `lodash`; `@scope/pkg/sub` -> `@scope/pkg`; a relative or
+    absolute path (`./x`, `/x`) is not a package and yields ``None``.
+    """
+    if not specifier or specifier[0] in "./":
+        return None
+    parts = specifier.split("/")
+    if specifier.startswith("@"):
+        return "/".join(parts[:2]) if len(parts) >= 2 else None
+    return parts[0]
