@@ -346,15 +346,37 @@ def _find_readme(checkout_path: Path) -> Path | None:
     return None
 
 
+# Helper: build the Bearer token pattern with proper quoting.
+# Screens out documentation language, template syntax, and short values.
+def _compile_bearer_pattern():
+    kw = (r"token|authentication|required|reset|scope|scheme|type|header|usage|format")
+    tmpl = r"\$\{|\{\{|<.*>"
+    # Unquoted token: starts with alnum, at least 8 chars total.
+    # Real bearer tokens are long opaque strings; short words like
+    # "access", "value", or "my" are prose, not credentials.
+    token = r"[a-zA-Z0-9]\S{7,}"
+    dquoted = '"' + r"[^\"]{2,}" + '"'  # double-quoted
+    squoted = "'" + r"[^']{2,}" + "'"  # single-quoted
+    return re.compile(
+        r"(?i)Bearer\s+(?!" + kw + r")"
+        r"(?!.*(?:" + tmpl + r"))"
+        r"(" + token + r"|" + dquoted + r"|" + squoted + r")"
+    )
+
 # (kind, compiled pattern, editorial severity). Each entry is a high-confidence
 # structural signature for a committed secret; severity is editorial per the kind
 # of credential exposed (ADR-0004). The full matched value is never reported —
 # only the kind and the file:line locate it.
 _SECRET_PATTERNS = [
+    # JWT: high-confidence structural match for embedded JSON Web Tokens.
+    # JWTs start with eyJ (base64 of {"), have header.payload format.
+    # Placed before bearer pattern so JWT finding wins during dedup.
+    ("jwt", re.compile(r"(?i)Bearer eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?"), HIGH),
     ("private key", re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----"), CRITICAL),
     ("AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b"), HIGH),
     ("GitHub token", re.compile(r"\bgh[pousr]_[0-9A-Za-z]{36}\b"), HIGH),
     ("Slack token", re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b"), HIGH),
+    ("bearer token", _compile_bearer_pattern(), HIGH),
 ]
 
 # A config assignment whose key names a credential, capturing the assigned value.
@@ -379,6 +401,39 @@ _PLACEHOLDER_VALUE = re.compile(
 _GENERIC_CREDENTIAL_MIN_LEN = 6
 
 
+# Auth-related method names whose calls with hardcoded string arguments signal
+# deliberate misuse of credentials. Single-line regex — no cross-line variable
+# tracking (that would require AST-level analysis, out of scope for a throwaway).
+_AUTH_METHOD_RE = re.compile(
+    r"\b(?:setToken|withToken|withAuth|authenticate|setApiKey)\s*\(\s*(?:['\"][^'\"]*['\"]\s*)\)"
+)
+
+
+def _detect_function_call_secrets(
+    repo_name: str, checkout_path: Path
+) -> list[Finding]:
+    """Detect auth-related method calls with hardcoded credential values.
+
+    Scans for calls like setToken("abc") or withAuth('xyz') in Java/JS/TS source.
+    Each occurrence is a separate finding at file:line.
+    """
+    findings = []
+    for source in _iter_text_files(checkout_path):
+        relative = source.relative_to(checkout_path).as_posix()
+        for lineno, line in enumerate(source.read_text(errors="replace").splitlines(), 1):
+            if _AUTH_METHOD_RE.search(line):
+                findings.append(
+                    Finding(
+                        repo=repo_name,
+                        check_id=SECRETS_CHECK_ID,
+                        category="security",
+                        severity=HIGH,
+                        evidence=f"Possible hardcoded auth credential in method call at {relative}:{lineno}.",
+                        location=relative,
+                    ))
+    return findings
+
+
 def check_secrets(repo_name: str, checkout_path: Path) -> list[Finding]:
     """Scan a Subject Repo's checkout for committed secrets (ADR-0007: local only)."""
     findings = []
@@ -391,12 +446,31 @@ def check_secrets(repo_name: str, checkout_path: Path) -> list[Finding]:
                     findings.append(
                         _secret_finding(repo_name, kind, severity, relative, lineno))
                     matched = True
+                    break  # highest-priority structural match wins (e.g. JWT over Bearer)
             # A high-confidence structural match supersedes the generic key=value
             # rule, so a line like `GITHUB_TOKEN=ghp_...` yields a single finding.
             if not matched and _is_committed_credential(line):
                 findings.append(
                     _secret_finding(repo_name, "credential", MEDIUM, relative, lineno))
-    return findings
+    # Function-call detection catches auth-method calls with hardcoded values.
+    # Runs after the per-line pass; results merged into findings.
+    findings.extend(_detect_function_call_secrets(repo_name, checkout_path))
+    # Stable sort by location then line number (embedded in evidence for fn-call findings).
+    return sorted(findings, key=lambda f: (f.location, _lineno_from_finding(f)))
+
+
+def _lineno_from_finding(f: Finding) -> int:
+    """Extract line number from a finding's evidence for sorting."""
+    import re as _re
+    # Structural: '...at file:42 (value redacted).'
+    m = _re.search(r"at\s+\S+?(\d+)\s*\(value redacted", f.evidence)
+    if m:
+        return int(m.group(1))
+    # Function-call: '...at file:17.'
+    m = _re.search(r"at\s+\S+?(\d+)\.$", f.evidence)
+    if m:
+        return int(m.group(1))
+    return 0
 
 
 def _secret_finding(repo_name, kind, severity, location, lineno):
