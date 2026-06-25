@@ -177,3 +177,180 @@ def test_placeholder_credential_values_are_not_flagged(tmp_path):
     )
 
     assert check_secrets("payments-service", tmp_path) == []
+
+
+def test_bearer_token_emits_one_high_finding(tmp_path):
+    (tmp_path / "App.java").write_text(
+        'header.put("Authorization", "Bearer sk-proj-abc123token456");\n'
+    )
+
+    findings = check_secrets("payments-service", tmp_path)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.severity == "High"
+    assert finding.category == "security"
+    assert "bearer" in finding.evidence.lower()
+    assert "App.java:1" in finding.evidence
+
+
+def test_bearer_prose_and_templates_are_not_flagged(tmp_path):
+    (tmp_path / "docs.md").write_text(
+        "Use Bearer token for authentication.\n"       # documentation prose
+        "Set the header to Bearer authentication.\n"  # documentation prose
+        "Authorization: Bearer ${BEARER_TOKEN}\n"      # template variable
+        'Authorization: Bearer {{ bearer }}\n'          # template variable
+        "Authorization: Bearer <token>\n"               # angle-bracket placeholder
+        "Bearer required for access\n"                  # documentation prose
+    )
+
+    assert check_secrets("payments-service", tmp_path) == []
+
+
+def test_jwt_emits_one_high_finding(tmp_path):
+    (tmp_path / "config.yml").write_text(
+        'token: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123\n'
+    )
+
+    findings = check_secrets("payments-service", tmp_path)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.severity == "High"
+    assert finding.category == "security"
+    assert "jwt" in finding.evidence.lower()
+
+
+def test_jwt_dedup_with_bearer_emits_single_jwt_finding(tmp_path):
+    # A real JWT line matches both the JWT pattern and the Bearer pattern.
+    # Only the higher-specificity JWT finding should be emitted.
+    (tmp_path / "service.ts").write_text(
+        'this.authService = new AuthService("Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.sig");\n'
+    )
+
+    findings = check_secrets("payments-service", tmp_path)
+
+    assert len(findings) == 1
+    assert "jwt" in findings[0].evidence.lower()
+    assert "bearer" not in findings[0].evidence.lower()
+
+
+def test_auth_method_call_with_hardcoded_token_emits_high_finding(tmp_path):
+    (tmp_path / "AuthService.java").write_text(
+        'class AuthService {\n'
+        '    void init() { setToken("sk-live-abc123xyz"); }\n'
+        '}\n'
+    )
+
+    findings = check_secrets("payments-service", tmp_path)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.severity == "High"
+    assert finding.category == "security"
+    assert "hardcoded" in finding.evidence.lower() or "auth" in finding.evidence.lower()
+    assert "AuthService.java" in finding.evidence
+
+
+def test_all_five_auth_methods_are_detected(tmp_path):
+    (tmp_path / "AuthModule.ts").write_text(
+        'withToken(\'js-token-123\');\n'
+        'withAuth("auth-value");\n'
+        'authenticate("auth-pass");\n'
+        'setApiKey("key-abc");\n'
+    )
+
+    findings = check_secrets("payments-service", tmp_path)
+
+    assert len(findings) == 4
+    assert all(f.severity == "High" and f.category == "security" for f in findings)
+
+
+def test_non_target_methods_are_not_flagged(tmp_path):
+    (tmp_path / "Config.java").write_text(
+        'class Config {\n'
+        '    void init() {\n'
+        '        setConfig("value");\n'
+        '        getToken("something");\n'
+        '        authenticateUser("user");\n'
+        '        withCredentials("cred");\n'
+        '    }\n'
+        '}\n'
+    )
+
+    # Only setToken/withToken/withAuth/authenticate/setApiKey are targeted.
+    # authenticateUser() contains authenticate but has a suffix, so it should NOT match
+    # (word boundary \b prevents it).
+    findings = check_secrets("payments-service", tmp_path)
+
+    assert len(findings) == 0
+
+
+def test_variable_references_are_not_flagged(tmp_path):
+    (tmp_path / "Auth.java").write_text(
+        'class Auth {\n'
+        '    void init() {\n'
+        '        setToken(userToken);\n'
+        '        withToken(getToken());\n'
+        '    }\n'
+        '}\n'
+    )
+
+    assert check_secrets("payments-service", tmp_path) == []
+
+
+def test_integration_all_new_patterns_together(tmp_path):
+    """Verify all new patterns work together in a realistic multi-file repo."""
+    # Bearer token in .env
+    (tmp_path / ".env").write_text(
+        'AUTHORIZATION=Bearer sk-proj-abc123token456\n'
+        'TEMPLATE_BEARER=Bearer ${TOKEN}\n'  # should NOT match
+    )
+    # JWT in JS
+    (tmp_path / "api.ts").write_text(
+        'const token = "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig";\n'
+        'const header = {Authorization: "Bearer token"};'  # should NOT match (prose)
+    )
+    # Function call in Java
+    (tmp_path / "Service.java").write_text(
+        'class Service {\n'
+        '    void init() { authenticate("hardcoded-auth-123"); }\n'
+        '}\n'
+    )
+    # Clean file
+    (tmp_path / "Clean.java").write_text('class Clean {}\n')
+
+    findings = check_secrets("payments-service", tmp_path)
+
+    # Should find: Bearer in .env, JWT in api.ts, authenticate() in Service.java
+    assert len(findings) == 3
+    locations = [f.location for f in findings]
+    assert ".env" in locations
+    assert "api.ts" in locations
+    assert "Service.java" in locations
+    # Evidence should not leak any token values
+    evidence = "".join(f.evidence for f in findings)
+    assert "sk-proj-abc123token456" not in evidence
+    assert "eyJhbGciOiJIUzI1NiJ9" not in evidence
+    assert "hardcoded-auth-123" not in evidence
+
+
+def test_findings_sorted_by_location(tmp_path):
+    """Verify findings from multiple checks are sorted by location."""
+    (tmp_path / "zeta.java").write_text(
+        'class Z { void init() { setToken("tok-1"); } }\n'
+    )
+    (tmp_path / "alpha.env").write_text(
+        'key=Bearer abc-token\n'
+    )
+    (tmp_path / "beta.ts").write_text(
+        'x = "Bearer eyJhbGciOiJIUzI1NiJ9.eyJ0ZXN0IjoiMSJ9.sig";\n'
+    )
+
+    findings = check_secrets("payments-service", tmp_path)
+
+    # alpha.env (Bearer) should come first, then beta.ts (JWT), then zeta.java (fn call)
+    assert len(findings) == 3
+    assert findings[0].location == "alpha.env"
+    assert findings[1].location == "beta.ts"
+    assert findings[2].location == "zeta.java"
