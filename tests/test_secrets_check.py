@@ -266,6 +266,53 @@ def test_all_five_auth_methods_are_detected(tmp_path):
     assert all(f.severity == "High" and f.category == "security" for f in findings)
 
 
+def test_camelcase_variable_with_token_substring_is_not_flagged(tmp_path):
+    """Variable names containing credential keywords as substrings (camelCase)
+    should not trigger the generic credential assignment pattern.
+    
+    But a variable whose name IS a credential keyword (e.g. accessToken, sessionToken)
+    SHOULD still be flagged — those ARE conventionally credential-named."""
+    (tmp_path / "Auth.java").write_text(
+        'class Auth {\n'
+        '    String existingAccessToken = redisTemplate.opsForValue().get(userRefId);\n'
+        '    String sessionToken = jwtUtils.generateToken(userRefId);\n'
+        '    String mapToken = config.getString("token");\n'
+        '    String hideSecret = vault.lookup("secret");\n'
+        '}\n'
+    )
+    # accessToken = "..." WOULD match (keyword at start of identifier)
+    # But these embedded cases should not
+    assert len(check_secrets("payments-service", tmp_path)) == 0
+
+
+def test_type_annotation_values_are_not_flagged(tmp_path):
+    """TypeScript/JS type declarations (e.g. password: string) should not be
+    flagged as hardcoded credentials."""
+    (tmp_path / "Types.ts").write_text(
+        'interface Config {\n'
+        '    password: string;\n'
+        '    token: string | undefined;\n'
+        '    apiKey: Buffer;\n'
+        '    callback: Promise<void>;\n'
+        '    value: Array<Map<string, number>>;\n'
+        '}\n'
+    )
+
+    assert check_secrets("payments-service", tmp_path) == []
+
+
+def test_credential_keyword_at_start_of_identifier_still_matches(tmp_path):
+    """Variable names that ARE credential keywords (not compound identifiers)
+    should still be flagged."""
+    (tmp_path / "Config.java").write_text(
+        'class Config {\n'
+        '    String accessToken = "sk-live-abc123";\n'
+        '}\n'
+    )
+    findings = check_secrets("payments-service", tmp_path)
+    assert len(findings) == 1
+
+
 def test_non_target_methods_are_not_flagged(tmp_path):
     (tmp_path / "Config.java").write_text(
         'class Config {\n'
