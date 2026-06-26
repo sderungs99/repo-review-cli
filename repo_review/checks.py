@@ -368,7 +368,7 @@ def _compile_bearer_pattern():
 # of credential exposed (ADR-0004). The full matched value is never reported —
 # only the kind and the file:line locate it.
 _SECRET_PATTERNS = [
-    # JWT: high-confidence structural match for embedded JSON Web Tokens.
+    # JWT: high-confidence structural m`atch for embedded JSON Web Tokens.
     # JWTs start with eyJ (base64 of {"), have header.payload format.
     # Placed before bearer pattern so JWT finding wins during dedup.
     ("jwt", re.compile(r"(?i)Bearer eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?"), HIGH),
@@ -384,7 +384,7 @@ _SECRET_PATTERNS = [
 # separator, so apiKey / api_key / API_KEY all qualify but an unrelated key does
 # not. Severity is Medium: the key proves intent but the value is unverifiable.
 _CREDENTIAL_ASSIGNMENT = re.compile(
-    r"(?i)(?:password|passwd|pwd|secret|api[_-]?key|apikey|"
+    r"(?i)(?<![a-zA-Z])(?:password|passwd|pwd|secret|api[_-]?key|apikey|"
     r"access[_-]?key|access[_-]?token|token)\s*[:=]\s*(.+)$"
 )
 
@@ -393,12 +393,45 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
 # too-short values are screened separately.
 _PLACEHOLDER_VALUE = re.compile(
     r"(?i)^(?:change[-_]?me|password|secret|example|sample|test|dummy|"
-    r"none|null|todo|tbd|x+|\*+|your[_-].*)$"
+    r"none|null|todo|tbd|x+|\*+|your[_-].*"
+    r"|string|number|boolean|void|any|never|unknown|bigint|symbol"
+    r")$"
 )
 
 # Below this length a captured value carries too little signal to be a real
 # credential, so it is not flagged (screens empties and trivial stubs).
 _GENERIC_CREDENTIAL_MIN_LEN = 6
+
+# Values that are plainly code references, not committed secrets. A real
+# credential is a literal value (string, number, etc.); method calls, field
+# accesses, and statement-terminated expressions are references, not secrets.
+_CODE_REFERENCE_RE = re.compile(
+    r"(?i)"                          # case-insensitive
+    r".*\(.*\)"                      # contains parens → method/constructor call
+    r"|\S+\.\S+"                     # dot notation → object access
+    r"|;"                            # semicolon → statement terminator (Java/TS/C)
+    r"|\b(null|undefined|None)\b"     # language null values (whole-word)
+)
+
+# TypeScript/JS type annotations that look like single-word values.
+# Matches keywords (string, Buffer), generics (Array<T>), and unions
+# (string | null). These are type declarations, not committed credentials.
+_TYPE_ANNOTATION_RE = re.compile(
+    r"(?i)"
+    r"^(?:"
+    r"string|number|boolean|void|null|undefined|never|any|unknown|bigint|symbol|"
+    r"Buffer|Object|Array|Map|Set|Promise|Record|Partial|Readonly|"
+    r"Required|Iterator|AsyncIterator|Function|RegExp|Date|Error|"
+    r"SetTimeoutCallback|NodeJS|GlobalThis"
+    r")"
+    r"(?:\s*<[^>]+>)?"                          # optional generics
+    r"(?:\s*\|[^|]+)*$"                          # optional union parts
+)
+
+# Alias for the calling convention — we use .search() so embedded patterns
+# (like a trailing semicolon) are detected regardless of position.
+def _is_code_reference(value: str) -> bool:
+    return bool(_CODE_REFERENCE_RE.search(value))
 
 
 # Auth-related method names whose calls with hardcoded string arguments signal
@@ -491,6 +524,10 @@ def _is_committed_credential(line: str) -> bool:
     if not match:
         return False
     value = match.group(1).strip()
+    # Strip trailing semicolons — they are statement terminators in Java/TS/C,
+    # not part of the value. Handles both quoted ("val"; → "val") and
+    # unquoted (string; → string) cases.
+    value = value.rstrip("; ").rstrip()
     if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
         value = value[1:-1].strip()
     if len(value) < _GENERIC_CREDENTIAL_MIN_LEN:
@@ -500,6 +537,10 @@ def _is_committed_credential(line: str) -> bool:
     if any(c.isspace() for c in value):
         return False
     if "${" in value or "{{" in value or (value.startswith("<") and value.endswith(">")):
+        return False
+    if _is_code_reference(value):
+        return False
+    if _TYPE_ANNOTATION_RE.match(value):
         return False
     return not _PLACEHOLDER_VALUE.match(value)
 
